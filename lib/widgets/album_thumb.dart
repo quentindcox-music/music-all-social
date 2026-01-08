@@ -1,99 +1,44 @@
 // lib/widgets/album_thumb.dart
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 class AlbumThumb extends StatelessWidget {
+  final String releaseId;
+  final double size;
+
   const AlbumThumb({
-    super.key,
     required this.releaseId,
-    this.size = 64,
+    this.size = 48,
+    super.key,
   });
 
-  /// MusicBrainz release-group MBID (same as your albumId from search).
-  final String releaseId;
-
-  /// Square size of the thumbnail.
-  final double size;
-
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    // Cover Art Archive: release-group front image
     final coverUrl =
-        'https://coverartarchive.org/release-group/$releaseId/front-250.jpg';
+        'https://coverartarchive.org/release-group/$releaseId/front-250';
 
     return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
+      borderRadius: BorderRadius.circular(4),
+      child: CachedNetworkImage(
+        imageUrl: coverUrl,
         width: size,
         height: size,
-        color: theme.colorScheme.surfaceContainerHighest,
-        child: Image.network(
-          coverUrl,
-          fit: BoxFit.cover,
-          // If the image fails (404 / network), fall back to a simple placeholder.
-          errorBuilder: (context, error, stackTrace) {
-            return _PlaceholderArt(size: size);
-          },
-          // Optional: show a subtle placeholder while loading
-          loadingBuilder: (context, child, loadingProgress) {
-            if (loadingProgress == null) return child;
-            return _ShimmerPlaceholder(size: size);
-          },
+        fit: BoxFit.cover,
+        placeholder: (context, url) => Container(
+          width: size,
+          height: size,
+          color: Colors.grey[800],
+          child: const Center(
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
         ),
-      ),
-    );
-  }
-}
-
-class _PlaceholderArt extends StatelessWidget {
-  const _PlaceholderArt({required this.size});
-
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      width: size,
-      height: size,
-      color: theme.colorScheme.surfaceContainerHighest,
-      child: Icon(
-        Icons.album,
-        size: size * 0.5,
-        color: theme.colorScheme.outline,
-      ),
-    );
-  }
-}
-
-class _ShimmerPlaceholder extends StatelessWidget {
-  const _ShimmerPlaceholder({required this.size});
-
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      width: size,
-      height: size,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            theme.colorScheme.surfaceContainerHighest,
-            theme.colorScheme.surfaceContainerHighest,
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
+        errorWidget: (context, url, error) => Container(
+          width: size,
+          height: size,
+          color: Colors.grey[800],
+          child: const Icon(Icons.album, color: Colors.grey),
         ),
-      ),
-      child: Icon(
-        Icons.music_note,
-        size: size * 0.4,
-        color: theme.colorScheme.outline,
       ),
     );
   }

@@ -1,22 +1,23 @@
+// lib/services/album_service.dart
+
 import 'dart:convert';
 import 'dart:io';
-
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart'; // kDebugMode / debugPrint
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:retry/retry.dart';
 
+import '../models/album.dart';
 import 'musicbrainz_service.dart';
 
 class AlbumService {
   static final FirebaseFirestore _db = FirebaseFirestore.instance;
 
-  /// Used in the User-Agent header for all MusicBrainz calls.
-  /// 🔹 TIP: put a real contact email here (MusicBrainz prefers that).
   static const String _mbUserAgent =
       'music_all_app/1.0.0 (quentincoxmusic@gmail.com)';
 
-  /// Create a HTTP client that plays nicely with MusicBrainz TLS on iOS.
   static IOClient _createMbClient() {
     final HttpClient io = HttpClient()
       ..idleTimeout = const Duration(seconds: 15)
@@ -26,58 +27,116 @@ class AlbumService {
   }
 
   /// Creates/updates an album doc using the MusicBrainz Release Group as source.
-  ///
-  /// - Writes to:  albums/{releaseGroupId}
-  /// - Also ensures: artists/{primaryArtistId} exists (if available)
-  /// - Then triggers a tracklist update under: albums/{id}/tracks
-  static Future<void> upsertFromMusicBrainz(MbReleaseGroup rg) async {
+  /// Now with retry logic and better error handling.
+  static Future<Album> upsertFromMusicBrainz(MbReleaseGroup rg) async {
     final albumRef = _db.collection('albums').doc(rg.id);
 
-    // 1) Upsert album document
-    await albumRef.set(
-      {
-        'id': rg.id,
-        'title': rg.title,
-        'primaryArtistName': rg.primaryArtistName,
-        'primaryArtistId': rg.primaryArtistId ?? '',
-        'firstReleaseDate': rg.firstReleaseDate ?? '',
-        'primaryType': rg.primaryType ?? '',
-        'source': 'musicbrainz',
-        'updatedAt': FieldValue.serverTimestamp(),
-        // createdAt is preserved on merges if already present
-        'createdAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
+    try {
+      // Use retry for network resilience
+      await retry(
+        () async {
+          // 1) Upsert album document
+          await albumRef.set(
+            {
+              'id': rg.id,
+              'title': rg.title,
+              'primaryArtistName': rg.primaryArtistName,
+              'primaryArtistId': rg.primaryArtistId ?? '',
+              'firstReleaseDate': rg.firstReleaseDate ?? '',
+              'primaryType': rg.primaryType ?? '',
+              'source': 'musicbrainz',
+              'coverUrl': 'https://coverartarchive.org/release-group/${rg.id}/front-250',
+              'updatedAt': FieldValue.serverTimestamp(),
+              'createdAt': FieldValue.serverTimestamp(),
+            },
+            SetOptions(merge: true),
+          );
 
-    // 2) Upsert basic artist doc (if we have an artist MBID)
-    if (rg.primaryArtistId != null && rg.primaryArtistId!.isNotEmpty) {
-      final artistRef = _db.collection('artists').doc(rg.primaryArtistId!);
+          // 2) Upsert basic artist doc (if we have an artist MBID)
+          if (rg.primaryArtistId != null && rg.primaryArtistId!.isNotEmpty) {
+            final artistRef = _db.collection('artists').doc(rg.primaryArtistId!);
 
-      await artistRef.set(
-        {
-          'id': rg.primaryArtistId,
-          'name': rg.primaryArtistName,
-          'updatedAt': FieldValue.serverTimestamp(),
-          'createdAt': FieldValue.serverTimestamp(),
+            await artistRef.set(
+              {
+                'id': rg.primaryArtistId,
+                'name': rg.primaryArtistName,
+                'updatedAt': FieldValue.serverTimestamp(),
+                'createdAt': FieldValue.serverTimestamp(),
+              },
+              SetOptions(merge: true),
+            );
+          }
         },
-        SetOptions(merge: true),
+        retryIf: (e) => e is SocketException || e is TimeoutException,
+        maxAttempts: 3,
       );
-    }
 
-    // 3) Fetch & store tracklist (soft-fails on network errors).
-    await updateTracklistFromMusicBrainz(rg);
+      // 3) Fetch & store tracklist (soft-fails on network errors)
+      await updateTracklistFromMusicBrainz(rg);
+
+      // 4) Fetch the created album and return it
+      final doc = await albumRef.get();
+      return Album.fromFirestore(doc);
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Failed to upsert album ${rg.id}: $e\n$st');
+      }
+      rethrow;
+    }
   }
 
-  /// Fetches a tracklist from MusicBrainz and stores it in:
-  ///   albums/{albumId}/tracks/{position}
+  /// Fetches an album by ID from Firestore
+  static Future<Album?> getAlbum(String albumId) async {
+    try {
+      final doc = await _db.collection('albums').doc(albumId).get();
+      if (!doc.exists) return null;
+      return Album.fromFirestore(doc);
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Failed to fetch album $albumId: $e\n$st');
+      }
+      rethrow;
+    }
+  }
+
+  /// Fetches tracks for an album
+  static Future<List<Track>> getTracks(String albumId) async {
+    try {
+      final snapshot = await _db
+          .collection('albums')
+          .doc(albumId)
+          .collection('tracks')
+          .orderBy('position')
+          .get();
+
+      return snapshot.docs.map((doc) => Track.fromFirestore(doc)).toList();
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Failed to fetch tracks for $albumId: $e\n$st');
+      }
+      return [];
+    }
+  }
+
+  /// Fetches a tracklist from MusicBrainz and stores it
   static Future<void> updateTracklistFromMusicBrainz(
     MbReleaseGroup rg,
   ) async {
     final albumRef = _db.collection('albums').doc(rg.id);
 
     try {
-      final List<Map<String, dynamic>> tracks = await _fetchTrackList(rg.id);
+      final List<Map<String, dynamic>> tracks = await retry(
+        () => _fetchTrackList(rg.id),
+        retryIf: (e) => e is SocketException || e is TimeoutException,
+        maxAttempts: 3,
+      );
+
+      if (tracks.isEmpty) {
+        if (kDebugMode) {
+          debugPrint('No tracks found for ${rg.title}');
+        }
+        return;
+      }
 
       final WriteBatch batch = _db.batch();
       final CollectionReference<Map<String, dynamic>> tracksRef =
@@ -105,18 +164,11 @@ class AlbumService {
           '⚠️ Failed to fetch tracklist for ${rg.id}: $e\n$st',
         );
       }
+      // Soft fail - don't throw
     }
   }
 
-  /// Fetches the tracklist for the *first* release in a release-group from
-  /// MusicBrainz and normalizes it to a simple list of maps.
-  ///
-  /// Each returned map looks like:
-  /// {
-  ///   "position": 1,
-  ///   "title": "Speed of Life",
-  ///   "durationSeconds": 154.0, // optional
-  /// }
+  /// Fetches the tracklist for the *first* release in a release-group
   static Future<List<Map<String, dynamic>>> _fetchTrackList(
     String releaseGroupId,
   ) async {
@@ -129,12 +181,12 @@ class AlbumService {
         '$base/release-group/$releaseGroupId?inc=releases&fmt=json',
       );
 
-      final http.Response releasesRes = await client.get(
-        releasesUrl,
-        headers: {
-          'User-Agent': _mbUserAgent,
-        },
-      );
+      final http.Response releasesRes = await client
+          .get(
+            releasesUrl,
+            headers: {'User-Agent': _mbUserAgent},
+          )
+          .timeout(const Duration(seconds: 15));
 
       if (releasesRes.statusCode != 200) {
         throw HttpException(
@@ -149,15 +201,9 @@ class AlbumService {
           (releasesJson['releases'] as List?) ?? const [];
 
       if (releases.isEmpty) {
-        if (kDebugMode) {
-          debugPrint(
-            'No releases found for release-group $releaseGroupId',
-          );
-        }
         return <Map<String, dynamic>>[];
       }
 
-      // For now, just pick the first release; can be made smarter later
       final String? firstReleaseId = releases.first['id'] as String?;
       if (firstReleaseId == null || firstReleaseId.isEmpty) {
         return <Map<String, dynamic>>[];
@@ -168,12 +214,12 @@ class AlbumService {
         '$base/release/$firstReleaseId?inc=recordings&fmt=json',
       );
 
-      final http.Response releaseRes = await client.get(
-        releaseUrl,
-        headers: {
-          'User-Agent': _mbUserAgent,
-        },
-      );
+      final http.Response releaseRes = await client
+          .get(
+            releaseUrl,
+            headers: {'User-Agent': _mbUserAgent},
+          )
+          .timeout(const Duration(seconds: 15));
 
       if (releaseRes.statusCode != 200) {
         throw HttpException(
@@ -197,8 +243,7 @@ class AlbumService {
           (firstMedium['tracks'] as List?) ?? const [];
 
       // 3) Normalize tracks
-      final List<Map<String, dynamic>> tracks =
-          <Map<String, dynamic>>[];
+      final List<Map<String, dynamic>> tracks = <Map<String, dynamic>>[];
       int position = 1;
 
       for (final dynamic t in tracksRaw) {
@@ -231,16 +276,50 @@ class AlbumService {
       }
 
       return tracks;
-    } catch (e, st) {
-      if (kDebugMode) {
-        debugPrint(
-          '⚠️ Tracklist fetch failed for $releaseGroupId: $e\n$st',
-        );
-      }
-      // Fail-soft so the UI just shows "No tracklist available yet."
-      return <Map<String, dynamic>>[];
     } finally {
       client.close();
+    }
+  }
+
+  /// Get average rating for an album
+  static Future<double?> getAverageRating(String albumId) async {
+    try {
+      final snapshot = await _db
+          .collectionGroup('reviews')
+          .where('albumId', isEqualTo: albumId)
+          .get();
+
+      if (snapshot.docs.isEmpty) return null;
+
+      double total = 0;
+      for (final doc in snapshot.docs) {
+        final rating = (doc.data()['rating'] as num?)?.toDouble() ?? 0;
+        total += rating;
+      }
+
+      return total / snapshot.docs.length;
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Failed to get average rating for $albumId: $e\n$st');
+      }
+      return null;
+    }
+  }
+
+  /// Get review count for an album
+  static Future<int> getReviewCount(String albumId) async {
+    try {
+      final snapshot = await _db
+          .collectionGroup('reviews')
+          .where('albumId', isEqualTo: albumId)
+          .get();
+
+      return snapshot.docs.length;
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Failed to get review count for $albumId: $e\n$st');
+      }
+      return 0;
     }
   }
 }

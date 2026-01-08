@@ -1,3 +1,5 @@
+// lib/screens/tabs_shell.dart
+
 import 'package:flutter/material.dart';
 
 import 'home_page.dart';
@@ -9,25 +11,28 @@ class TabsShell extends StatefulWidget {
   const TabsShell({super.key});
 
   @override
-  State<TabsShell> createState() => _TabsShellState();
+  State<TabsShell> createState() => TabsShellState();
 }
 
-class _TabsShellState extends State<TabsShell> {
+class TabsShellState extends State<TabsShell> {
   int _index = 0;
 
-  final _pages = const [
-    HomePage(),
-    DiscoverPage(),
-    StatsPage(),
-    ProfilePage(),
-  ];
+  // Public method to change tabs
+  void switchToTab(int index) {
+    setState(() => _index = index);
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: IndexedStack(
         index: _index,
-        children: _pages,
+        children: [
+          HomePage(onNavigateToTab: switchToTab),
+          const DiscoverPage(),
+          const StatsPage(),
+          const ProfilePage(),
+        ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
@@ -47,7 +52,7 @@ class _TabsShellState extends State<TabsShell> {
             icon: Icon(Icons.bar_chart_outlined),
             selectedIcon: Icon(Icons.bar_chart),
             label: 'Stats',
-          ),  
+          ),
           NavigationDestination(
             icon: Icon(Icons.person_outline),
             selectedIcon: Icon(Icons.person),

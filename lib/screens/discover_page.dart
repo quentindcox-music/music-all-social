@@ -1,9 +1,12 @@
+// lib/screens/discover_page.dart
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import '../widgets/album_thumb.dart';
 import '../services/musicbrainz_service.dart';
 import '../services/album_service.dart';
+import '../utils/error_handler.dart';
 import 'album_detail_page.dart';
 
 class DiscoverPage extends StatefulWidget {
@@ -68,10 +71,11 @@ class _DiscoverPageState extends State<DiscoverPage> {
 
       String message = 'Something went wrong. Please try again.';
       final text = e.toString();
-      if (text.contains('HandshakeException')) {
-        message =
-            'Check your internet '
-            'connection and try again.';
+      if (text.contains('HandshakeException') || 
+          text.contains('SocketException')) {
+        message = 'Check your internet connection and try again.';
+      } else if (text.contains('TimeoutException')) {
+        message = 'Request timed out. Please try again.';
       }
 
       setState(() {
@@ -81,22 +85,64 @@ class _DiscoverPageState extends State<DiscoverPage> {
     }
   }
 
+  Future<void> _onAlbumTap(MbReleaseGroup rg) async {
+    if (!mounted) return;
+
+    try {
+      // Show loading
+      ErrorHandler.showLoading(context, message: 'Loading album...');
+
+      // Create / update Firestore album data
+      await AlbumService.upsertFromMusicBrainz(rg);
+
+      // Hide loading
+      if (!mounted) return;
+      ErrorHandler.hideLoading(context);
+
+      // Navigate to the album detail page
+      if (!mounted) return;
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => AlbumDetailPage(albumId: rg.id),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ErrorHandler.hideLoading(context);
+      ErrorHandler.handle(
+        context,
+        e,
+        customMessage: 'Could not load album. Please try again.',
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Discover')),
+      appBar: AppBar(
+        title: const Text('Discover'),
+        elevation: 0,
+      ),
       body: Column(
         children: [
-          Padding(
+          // Search bar
+          Container(
+            color: theme.colorScheme.surface,
             padding: const EdgeInsets.all(12),
             child: TextField(
               controller: _controller,
               onChanged: _onQueryChanged,
               textInputAction: TextInputAction.search,
               decoration: InputDecoration(
-                labelText: 'Search albums / artists',
-                border: const OutlineInputBorder(),
+                labelText: 'Search albums or artists',
+                hintText: 'Try "Pink Floyd" or "Wish You Were Here"',
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                prefixIcon: const Icon(Icons.search),
                 suffixIcon: _controller.text.isEmpty
                     ? null
                     : IconButton(
@@ -111,98 +157,116 @@ class _DiscoverPageState extends State<DiscoverPage> {
             ),
           ),
 
+          // Loading indicator
           if (_loading) const LinearProgressIndicator(),
 
+          // Error message
           if (_error != null)
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              child: Text(
-                _error!,
-                style:
-                    TextStyle(color: Theme.of(context).colorScheme.error),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              color: theme.colorScheme.errorContainer,
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.error_outline,
+                    color: theme.colorScheme.onErrorContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _error!,
+                      style: TextStyle(
+                        color: theme.colorScheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
 
+          // Results
           Expanded(
-            child: _results.isEmpty
-                ? const Center(
-                    child: Text('Search for an album or artist.'),
-                  )
-                : ListView.separated(
-                    itemCount: _results.length,
-                    separatorBuilder: (_, _) =>
-                        const Divider(height: 0),
- itemBuilder: (context, i) {
-  final r = _results[i];
-  final subtitleParts = <String>[];
-
-  if ((r.firstReleaseDate ?? '').isNotEmpty) {
-    subtitleParts.add(r.firstReleaseDate!);
-  }
-  if ((r.primaryType ?? '').isNotEmpty) {
-    subtitleParts.add(r.primaryType!);
-  }
-
-  return ListTile(
-    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-
-    // 🔹 album thumbnail
-    leading: AlbumThumb(
-      releaseId: r.id,
-    ),
-
-    title: Text(r.title),
-
-    subtitle: Text(
-      [
-        r.primaryArtistName,
-        if (subtitleParts.isNotEmpty)
-          '• ${subtitleParts.join(' • ')}',
-      ].join(' '),
-    ),
-
-    trailing: const Icon(Icons.chevron_right),
-
-    onTap: () async {
-      try {
-        // show loading spinner while creating album entry
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => const Center(
-            child: CircularProgressIndicator(),
-          ),
-        );
-
-        // create / update Firestore album data
-        await AlbumService.upsertFromMusicBrainz(r);
-
-        // close spinner
-        if (context.mounted) Navigator.of(context).pop();
-
-        // navigate to the album detail page
-        if (!context.mounted) return;
-        Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => AlbumDetailPage(albumId: r.id),
-          ),
-        );
-      } catch (e) {
-        if (context.mounted) {
-          Navigator.of(context).pop();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not create album: $e')),
-          );
-        }
-      }
-    },
-  );
-},
-                  ),
+            child: _buildResultsList(theme),
           ),
         ],
       ),
     );
   }
-} 
+
+  Widget _buildResultsList(ThemeData theme) {
+    if (_results.isEmpty && !_loading) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.search,
+              size: 64,
+              color: theme.colorScheme.onSurface.withValues(alpha: 0.3),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Search for an album or artist',
+              style: theme.textTheme.titleMedium?.copyWith(
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Discover new music and rate your favorites',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.4),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.separated(
+      itemCount: _results.length,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (context, i) {
+        final r = _results[i];
+        final subtitleParts = <String>[];
+
+        if ((r.firstReleaseDate ?? '').isNotEmpty) {
+          // Extract year from date
+          final year = r.firstReleaseDate!.split('-').first;
+          subtitleParts.add(year);
+        }
+        if ((r.primaryType ?? '').isNotEmpty) {
+          subtitleParts.add(r.primaryType!);
+        }
+
+        return ListTile(
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 8,
+          ),
+          leading: AlbumThumb(
+            releaseId: r.id,
+            size: 56,
+          ),
+          title: Text(
+            r.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+          subtitle: Text(
+            [
+              r.primaryArtistName,
+              if (subtitleParts.isNotEmpty) subtitleParts.join(' • '),
+            ].join('\n'),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => _onAlbumTap(r),
+        );
+      },
+    );
+  }
+}

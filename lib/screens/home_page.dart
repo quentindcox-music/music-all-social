@@ -1,36 +1,35 @@
-// lib/home_page.dart (or lib/screens/home_page.dart)
+// lib/screens/home_page.dart
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import 'album_detail_page.dart';
 import 'artist_detail_page.dart';
-
-// Widget imports from widgets folder
 import 'package:music_all_app/widgets/home_header.dart';
 import 'package:music_all_app/widgets/hero_carousel.dart';
 import 'package:music_all_app/widgets/recently_viewed_section.dart';
 
 class HomePage extends StatelessWidget {
-  const HomePage({super.key});
+  final void Function(int)? onNavigateToTab;
+  
+  const HomePage({super.key, this.onNavigateToTab});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final user = FirebaseAuth.instance.currentUser; // may be null if signed out
+    final user = FirebaseAuth.instance.currentUser;
 
-    // For now: demo items. Later, map this from Firestore / APIs.
     final demoItems = <CarouselItem>[
       CarouselItem(
         title: 'Wish You Were Here',
         subtitle: 'Pink Floyd • Classic favorite',
         badge: 'Trending album',
-        imageUrl: null, // plug in cover URL later if you like
+        imageUrl: null,
         onTap: () {
           Navigator.of(context).push(
             MaterialPageRoute(
               builder: (_) => const AlbumDetailPage(
-                albumId: 'test-album-1', // replace with real album IDs later
+                albumId: 'test-album-1',
               ),
             ),
           );
@@ -45,7 +44,7 @@ class HomePage extends StatelessWidget {
           Navigator.of(context).push(
             MaterialPageRoute(
               builder: (_) => const ArtistDetailPage(
-                artistId: 'demo-artist-bowie', // wire real MBID later
+                artistId: 'demo-artist-bowie',
                 artistName: 'David Bowie',
               ),
             ),
@@ -58,12 +57,7 @@ class HomePage extends StatelessWidget {
         badge: 'Discover',
         imageUrl: null,
         onTap: () {
-          // Later: maybe jump to Discover tab / page.
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Hook this up to Discover later ✨'),
-            ),
-          );
+          onNavigateToTab?.call(1); // Go to Discover
         },
       ),
     ];
@@ -71,57 +65,220 @@ class HomePage extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Music All'),
+        elevation: 0,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.notifications_outlined),
+            onPressed: () {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Notifications coming soon!')),
+              );
+            },
+          ),
+        ],
       ),
-      body: SafeArea(
-        child: ListView(
-          padding: EdgeInsets.zero,
-          children: [
-            // 👋 Welcome back, (username)
-            const WelcomeBackHeader(),
-            const SizedBox(height: 8),
+      body: RefreshIndicator(
+        onRefresh: () async {
+          await Future.delayed(const Duration(seconds: 1));
+        },
+        child: SafeArea(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              const WelcomeBackHeader(),
+              const SizedBox(height: 8),
 
-            // 🎠 Hero carousel (news or trending albums/artists)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: HeroCarousel(items: demoItems),
-            ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: HeroCarousel(items: demoItems),
+              ),
 
-            const SizedBox(height: 16),
-
-            // 🕒 Recently viewed — only if we have a signed-in user
-            if (user != null) ...[
-              RecentlyViewedSection(uid: user.uid),
               const SizedBox(height: 24),
-            ],
 
-            // You can evolve this section later (recent activity, shortcuts, etc.)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Text(
-                'Quick actions',
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
+              if (user != null) ...[
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Recently Viewed',
+                        style: theme.textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          // TODO: Navigate to full recently viewed page
+                        },
+                        child: const Text('View all'),
+                      ),
+                    ],
+                  ),
+                ),
+                RecentlyViewedSection(uid: user.uid),
+                const SizedBox(height: 24),
+              ],
+
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  'Quick Actions',
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: FilledButton.icon(
-                onPressed: () {
-                  // Later: navigate to your Discover tab/page
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Hook this to Discover albums next 🎧'),
+              const SizedBox(height: 12),
+
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Column(
+                  children: [
+                    _QuickActionCard(
+                      icon: Icons.search,
+                      title: 'Discover Music',
+                      subtitle: 'Find new albums and artists',
+                      color: theme.colorScheme.primaryContainer,
+                      onTap: () => onNavigateToTab?.call(1), // Discover tab
                     ),
-                  );
-                },
-                icon: const Icon(Icons.search),
-                label: const Text('Discover music'),
+                    const SizedBox(height: 12),
+                    _QuickActionCard(
+                      icon: Icons.star_outline,
+                      title: 'Your Reviews',
+                      subtitle: 'See what you\'ve rated',
+                      color: theme.colorScheme.secondaryContainer,
+                      onTap: () => onNavigateToTab?.call(2), // Stats tab
+                    ),
+                    const SizedBox(height: 12),
+                    _QuickActionCard(
+                      icon: Icons.bar_chart,
+                      title: 'Your Stats',
+                      subtitle: 'View your listening statistics',
+                      color: theme.colorScheme.tertiaryContainer,
+                      onTap: () => onNavigateToTab?.call(2), // Stats tab
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 24),
-          ],
+
+              const SizedBox(height: 24),
+
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  'Community Activity',
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        Icon(
+                          Icons.people_outline,
+                          size: 48,
+                          color: theme.colorScheme.primary,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'See what others are listening to',
+                          style: theme.textTheme.titleMedium,
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Coming soon',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 24),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickActionCard extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _QuickActionCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  icon,
+                  color: theme.colorScheme.onPrimaryContainer,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.chevron_right,
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.4),
+              ),
+            ],
+          ),
         ),
       ),
     );
