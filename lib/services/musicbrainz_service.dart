@@ -146,32 +146,32 @@ class MusicBrainzService {
     );
   }
 
-  /// Fetch artist's release groups (discography)
-  static Future<List<Map<String, dynamic>>> fetchArtistReleaseGroups(String artistId) async {
-    if (artistId.isEmpty) return [];
+static Future<List<Map<String, dynamic>>> fetchArtistReleaseGroups(String artistId) async {
+  if (artistId.isEmpty) return [];
 
-    final url = Uri.parse(
-      'https://musicbrainz.org/ws/2/release-group?artist=$artistId&type=album|ep|single&fmt=json&limit=100',
-    );
+  final url = Uri.parse(
+    'https://musicbrainz.org/ws/2/release-group?artist=$artistId&type=album|ep|single&fmt=json&limit=100',
+  );
 
-    final resp = await http.get(url, headers: {
-      'User-Agent': 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
-      'Accept': 'application/json',
-    });
+  final resp = await http.get(url, headers: {
+    'User-Agent': 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
+    'Accept': 'application/json',
+  });
 
-    if (resp.statusCode != 200) return [];
+  if (resp.statusCode != 200) return [];
 
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
-    final groups = data['release-groups'] as List<dynamic>? ?? [];
+  final data = jsonDecode(resp.body) as Map<String, dynamic>;
+  final groups = data['release-groups'] as List<dynamic>? ?? [];
 
-    return groups.map((g) {
-      final m = g as Map<String, dynamic>;
-      return {
-        'id': m['id'] as String? ?? '',
-        'title': m['title'] as String? ?? '',
-        'primaryType': m['primary-type'] as String?,
-        'firstReleaseDate': m['first-release-date'] as String?,
-      };
-    }).where((m) => (m['id'] as String).isNotEmpty).toList();
-  }
+  return groups.map((g) {
+    final m = g as Map<String, dynamic>;
+    return {
+      'id': m['id'] as String? ?? '',
+      'title': m['title'] as String? ?? '',
+      'primaryType': m['primary-type'] as String?,
+      'secondaryTypes': m['secondary-types'] as List?,
+      'firstReleaseDate': m['first-release-date'] as String?,
+    };
+  }).where((m) => (m['id'] as String).isNotEmpty).toList();
+ }
 }

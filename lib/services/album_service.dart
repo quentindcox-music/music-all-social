@@ -27,15 +27,12 @@ class AlbumService {
   }
 
   /// Creates/updates an album doc using the MusicBrainz Release Group as source.
-  /// Now with retry logic and better error handling.
   static Future<Album> upsertFromMusicBrainz(MbReleaseGroup rg) async {
     final albumRef = _db.collection('albums').doc(rg.id);
 
     try {
-      // Use retry for network resilience
       await retry(
         () async {
-          // 1) Upsert album document
           await albumRef.set(
             {
               'id': rg.id,
@@ -52,7 +49,6 @@ class AlbumService {
             SetOptions(merge: true),
           );
 
-          // 2) Upsert basic artist doc (if we have an artist MBID)
           if (rg.primaryArtistId != null && rg.primaryArtistId!.isNotEmpty) {
             final artistRef = _db.collection('artists').doc(rg.primaryArtistId!);
 
@@ -71,10 +67,9 @@ class AlbumService {
         maxAttempts: 3,
       );
 
-      // 3) Fetch & store tracklist (soft-fails on network errors)
+      // Fetch & store tracklist
       await updateTracklistFromMusicBrainz(rg);
 
-      // 4) Fetch the created album and return it
       final doc = await albumRef.get();
       return Album.fromFirestore(doc);
     } catch (e, st) {
@@ -106,6 +101,7 @@ class AlbumService {
           .collection('albums')
           .doc(albumId)
           .collection('tracks')
+          .orderBy('disc')
           .orderBy('position')
           .get();
 
@@ -119,10 +115,18 @@ class AlbumService {
   }
 
   /// Fetches a tracklist from MusicBrainz and stores it
-  static Future<void> updateTracklistFromMusicBrainz(
-    MbReleaseGroup rg,
-  ) async {
+  static Future<void> updateTracklistFromMusicBrainz(MbReleaseGroup rg) async {
     final albumRef = _db.collection('albums').doc(rg.id);
+    final tracksRef = albumRef.collection('tracks');
+
+    // Check if tracks already exist
+    final existingTracks = await tracksRef.limit(1).get();
+    if (existingTracks.docs.isNotEmpty) {
+      if (kDebugMode) {
+        debugPrint('Tracks already exist for ${rg.title}, skipping fetch');
+      }
+      return;
+    }
 
     try {
       final List<Map<String, dynamic>> tracks = await retry(
@@ -139,11 +143,11 @@ class AlbumService {
       }
 
       final WriteBatch batch = _db.batch();
-      final CollectionReference<Map<String, dynamic>> tracksRef =
-          albumRef.collection('tracks');
 
       for (final Map<String, dynamic> t in tracks) {
-        final String docId = '${t['position']}';
+        final disc = t['disc'] ?? 1;
+        final position = t['position'] ?? 0;
+        final String docId = '${disc}_$position';
         batch.set(
           tracksRef.doc(docId),
           t,
@@ -164,11 +168,41 @@ class AlbumService {
           '⚠️ Failed to fetch tracklist for ${rg.id}: $e\n$st',
         );
       }
-      // Soft fail - don't throw
     }
   }
 
-  /// Fetches the tracklist for the *first* release in a release-group
+  /// Fetches and stores tracks for an album by ID (for existing albums missing tracks)
+  static Future<void> fetchAndStoreTracksById(String albumId) async {
+    final albumRef = _db.collection('albums').doc(albumId);
+    final tracksRef = albumRef.collection('tracks');
+
+    final existingTracks = await tracksRef.limit(1).get();
+    if (existingTracks.docs.isNotEmpty) return;
+
+    try {
+      final tracks = await _fetchTrackList(albumId);
+      if (tracks.isEmpty) return;
+
+      final batch = _db.batch();
+      for (final t in tracks) {
+        final disc = t['disc'] ?? 1;
+        final position = t['position'] ?? 0;
+        final docId = '${disc}_$position';
+        batch.set(tracksRef.doc(docId), t);
+      }
+      await batch.commit();
+      
+      if (kDebugMode) {
+        debugPrint('Fetched ${tracks.length} tracks for album $albumId');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Failed to fetch tracks for $albumId: $e');
+      }
+    }
+  }
+
+  /// Fetches the tracklist for the *best* release in a release-group
   static Future<List<Map<String, dynamic>>> _fetchTrackList(
     String releaseGroupId,
   ) async {
@@ -204,14 +238,27 @@ class AlbumService {
         return <Map<String, dynamic>>[];
       }
 
-      final String? firstReleaseId = releases.first['id'] as String?;
-      if (firstReleaseId == null || firstReleaseId.isEmpty) {
+      // Try to find the best release (prefer official, complete releases)
+      String? bestReleaseId;
+      for (final release in releases) {
+        final status = release['status'] as String?;
+        if (status == 'Official') {
+          bestReleaseId = release['id'] as String?;
+          break;
+        }
+      }
+      bestReleaseId ??= releases.first['id'] as String?;
+
+      if (bestReleaseId == null || bestReleaseId.isEmpty) {
         return <Map<String, dynamic>>[];
       }
 
+      // Rate limiting delay
+      await Future.delayed(const Duration(milliseconds: 500));
+
       // 2) Fetch that release with recordings (tracks)
       final Uri releaseUrl = Uri.parse(
-        '$base/release/$firstReleaseId?inc=recordings&fmt=json',
+        '$base/release/$bestReleaseId?inc=recordings&fmt=json',
       );
 
       final http.Response releaseRes = await client
@@ -237,42 +284,39 @@ class AlbumService {
         return <Map<String, dynamic>>[];
       }
 
-      final Map<String, dynamic> firstMedium =
-          media.first as Map<String, dynamic>;
-      final List<dynamic> tracksRaw =
-          (firstMedium['tracks'] as List?) ?? const [];
-
-      // 3) Normalize tracks
+      // 3) Normalize tracks from ALL discs
       final List<Map<String, dynamic>> tracks = <Map<String, dynamic>>[];
-      int position = 1;
 
-      for (final dynamic t in tracksRaw) {
-        if (t is! Map<String, dynamic>) continue;
+      for (final medium in media) {
+        if (medium is! Map<String, dynamic>) continue;
 
-        final Map<String, dynamic>? recording =
-            t['recording'] as Map<String, dynamic>?;
+        final int discNum = (medium['position'] as num?)?.toInt() ?? 1;
+        final List<dynamic> tracksRaw =
+            (medium['tracks'] as List?) ?? const [];
 
-        final String title =
-            (recording?['title'] ?? t['title'] ?? '') as String? ?? '';
+        for (final t in tracksRaw) {
+          if (t is! Map<String, dynamic>) continue;
 
-        final dynamic lengthVal = t['length'];
-        double? durationSeconds;
-        if (lengthVal is int) {
-          durationSeconds = lengthVal / 1000.0;
-        } else if (lengthVal is String) {
-          final int? parsed = int.tryParse(lengthVal);
-          if (parsed != null) {
-            durationSeconds = parsed / 1000.0;
+          final int position = (t['position'] as num?)?.toInt() ?? 0;
+          final Map<String, dynamic>? recording =
+              t['recording'] as Map<String, dynamic>?;
+
+          final String title =
+              (t['title'] ?? recording?['title'] ?? '') as String;
+
+          final dynamic lengthVal = t['length'] ?? recording?['length'];
+          double? durationSeconds;
+          if (lengthVal is num) {
+            durationSeconds = lengthVal / 1000.0;
           }
+
+          tracks.add(<String, dynamic>{
+            'disc': discNum,
+            'position': position,
+            'title': title,
+            if (durationSeconds != null) 'durationSeconds': durationSeconds,
+          });
         }
-
-        tracks.add(<String, dynamic>{
-          'position': position,
-          'title': title,
-          if (durationSeconds != null) 'durationSeconds': durationSeconds,
-        });
-
-        position++;
       }
 
       return tracks;
@@ -285,19 +329,24 @@ class AlbumService {
   static Future<double?> getAverageRating(String albumId) async {
     try {
       final snapshot = await _db
-          .collectionGroup('reviews')
-          .where('albumId', isEqualTo: albumId)
+          .collection('albums')
+          .doc(albumId)
+          .collection('reviews')
           .get();
 
       if (snapshot.docs.isEmpty) return null;
 
       double total = 0;
+      int count = 0;
       for (final doc in snapshot.docs) {
-        final rating = (doc.data()['rating'] as num?)?.toDouble() ?? 0;
-        total += rating;
+        final rating = (doc.data()['rating'] as num?)?.toDouble();
+        if (rating != null) {
+          total += rating;
+          count++;
+        }
       }
 
-      return total / snapshot.docs.length;
+      return count > 0 ? total / count : null;
     } catch (e, st) {
       if (kDebugMode) {
         debugPrint('⚠️ Failed to get average rating for $albumId: $e\n$st');
@@ -310,8 +359,9 @@ class AlbumService {
   static Future<int> getReviewCount(String albumId) async {
     try {
       final snapshot = await _db
-          .collectionGroup('reviews')
-          .where('albumId', isEqualTo: albumId)
+          .collection('albums')
+          .doc(albumId)
+          .collection('reviews')
           .get();
 
       return snapshot.docs.length;

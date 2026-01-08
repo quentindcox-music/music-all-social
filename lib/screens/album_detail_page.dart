@@ -54,6 +54,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     final uid = FirebaseAuth.instance.currentUser!.uid;
     final theme = Theme.of(context);
 
+
     return Scaffold(
       appBar: AppBar(title: const Text('Album')),
       body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
