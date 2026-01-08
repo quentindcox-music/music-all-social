@@ -1,3 +1,5 @@
+// lib/screens/album_detail_page.dart
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -17,39 +19,33 @@ class AlbumDetailPage extends StatefulWidget {
 }
 
 class _AlbumDetailPageState extends State<AlbumDetailPage> {
-  Color? _topColor;
-  Color? _bottomColor;
-  String? _paletteForCoverUrl; // to avoid recomputing for same art
+  Color? _dominantColor;
+  String? _paletteForCoverUrl;
 
   Future<void> _generatePalette(String coverUrl, ThemeData theme) async {
-    if (coverUrl.isEmpty) return;
-    if (_paletteForCoverUrl == coverUrl && _topColor != null) return;
+  if (coverUrl.isEmpty) return;
+  if (_paletteForCoverUrl == coverUrl && _dominantColor != null) return;
 
-    try {
-      final palette = await PaletteGenerator.fromImageProvider(
-        NetworkImage(coverUrl),
-        maximumColorCount: 16,
-      );
+  try {
+    final palette = await PaletteGenerator.fromImageProvider(
+      NetworkImage(coverUrl),
+      maximumColorCount: 20,
+    );
 
-      final dominant = palette.dominantColor?.color;
-      final vibrant = palette.vibrantColor?.color;
-      final darkVibrant = palette.darkVibrantColor?.color;
+    // Prefer vibrant colors over dark/muted ones
+    final color = palette.vibrantColor?.color ??
+        palette.lightVibrantColor?.color ??
+        palette.mutedColor?.color ??
+        palette.dominantColor?.color ??
+        theme.colorScheme.primary;
 
-      // nice fallbacks
-      final top = dominant ?? vibrant ?? theme.colorScheme.primary;
-      final bottom =
-          darkVibrant ?? palette.darkMutedColor?.color ?? theme.colorScheme.surface;
-
-      if (!mounted) return;
-      setState(() {
-        _paletteForCoverUrl = coverUrl;
-        _topColor = top;
-        _bottomColor = bottom;
-      });
-    } catch (_) {
-      // quietly fall back to theme colors
-    }
-  }
+    if (!mounted) return;
+    setState(() {
+      _paletteForCoverUrl = coverUrl;
+      _dominantColor = color;
+    });
+  } catch (_) {}
+}
 
   @override
   Widget build(BuildContext context) {
@@ -85,7 +81,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
           final primaryType = (album['primaryType'] ?? '') as String?;
           final coverUrl = (album['coverUrl'] as String?)?.trim() ?? '';
 
-          // mark as recently viewed (idempotent)
           RecentlyViewedService.markAlbumViewed(
             uid: uid,
             albumId: widget.albumId,
@@ -95,65 +90,81 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
             coverUrl: coverUrl,
           );
 
-          // kick off palette generation
           _generatePalette(coverUrl, theme);
 
           final releaseLabel = formatReleaseDate(firstReleaseDate);
-
-          final gradientTop = _topColor ?? theme.colorScheme.surface;
-          final gradientBottom =
-              _bottomColor ?? theme.colorScheme.surfaceContainerHighest;
+          final baseColor = _dominantColor ?? theme.colorScheme.surface;
+          
+          final darkenedColor = Color.lerp(baseColor, Colors.black, 0.4)!;
+          final bottomColor = theme.colorScheme.surface;
 
           return ListView(
             padding: EdgeInsets.zero,
             children: [
-              // ---------- TOP GRADIENT + ART + TEXT ----------
               Container(
-                padding:
-                    const EdgeInsets.fromLTRB(16, 16, 16, 20), // bottom tighter
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
+                    stops: const [0.0, 0.6, 1.0],
                     colors: [
-                      gradientTop,
-                      gradientTop.withValues(),
-                      gradientBottom,
+                      darkenedColor,
+                      darkenedColor.withValues(alpha: 0.6),
+                      bottomColor,
                     ],
                   ),
                 ),
                 child: Column(
                   children: [
-                    // art
-                    SizedBox(
-                      height: 220,
-                      child: AspectRatio(
-                        aspectRatio: 1,
-                        child: coverUrl.isNotEmpty
-                            ? Image.network(
-                                coverUrl,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, _, _) =>
-                                    _AlbumArtPlaceholder(title: title),
-                              )
-                            : _AlbumArtPlaceholder(title: title),
+                    Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.5),
+                            blurRadius: 24,
+                            offset: const Offset(0, 12),
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: SizedBox(
+                          height: 220,
+                          width: 220,
+                          child: coverUrl.isNotEmpty
+                              ? Image.network(
+                                  coverUrl,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, _, _) =>
+                                      _AlbumArtPlaceholder(title: title),
+                                )
+                              : _AlbumArtPlaceholder(title: title),
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 20),
 
-                    // title
                     Text(
                       title,
                       textAlign: TextAlign.center,
                       style: theme.textTheme.headlineSmall?.copyWith(
                         fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                        shadows: [
+                          Shadow(
+                            color: Colors.black.withValues(alpha: 0.5),
+                            blurRadius: 4,
+                          ),
+                        ],
                       ),
                     ),
                     const SizedBox(height: 8),
 
-                    // artist (tappable if we know artist id)
                     if (primaryArtistId.isNotEmpty)
-                      InkWell(
+                      GestureDetector(
                         onTap: () {
                           Navigator.of(context).push(
                             MaterialPageRoute(
@@ -164,19 +175,13 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                             ),
                           );
                         },
-                        borderRadius: BorderRadius.circular(4),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 2,
-                          ),
-                          child: Text(
-                            artist,
-                            textAlign: TextAlign.center,
-                            style: theme.textTheme.titleMedium?.copyWith(
-                              color: theme.colorScheme.primary,
-                              decoration: TextDecoration.underline,
-                            ),
+                        child: Text(
+                          artist,
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w800,
+                            color: Colors.purpleAccent.withValues(alpha: 0.95),
+                            letterSpacing: 0.3,
                           ),
                         ),
                       )
@@ -184,11 +189,13 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                       Text(
                         artist,
                         textAlign: TextAlign.center,
-                        style: theme.textTheme.titleMedium,
+                        style: theme.textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w800,
+                          color: Colors.purpleAccent.withValues(alpha: 0.95),
+                        ),
                       ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 14),
 
-                    // meta chips
                     Wrap(
                       spacing: 8,
                       runSpacing: 4,
@@ -199,8 +206,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                             icon: Icons.calendar_today_outlined,
                             label: releaseLabel,
                           ),
-                        if (primaryType != null &&
-                            primaryType.trim().isNotEmpty)
+                        if (primaryType != null && primaryType.trim().isNotEmpty)
                           _InfoChip(
                             icon: Icons.album_outlined,
                             label: primaryType,
@@ -211,11 +217,9 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                 ),
               ),
 
-              // ---------- TRACKLIST HEADER ----------
               const Divider(height: 1),
               Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 child: Text(
                   'Tracklist',
                   style: theme.textTheme.titleLarge?.copyWith(
@@ -224,7 +228,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                 ),
               ),
 
-              // ---------- TRACKLIST ----------
               StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: albumRef
                     .collection('tracks')
@@ -233,8 +236,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                 builder: (context, snap) {
                   if (snap.hasError) {
                     return Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: Text(
                         'Could not load tracklist.',
                         style: theme.textTheme.bodyMedium?.copyWith(
@@ -256,8 +258,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   final docs = snap.data?.docs ?? [];
                   if (docs.isEmpty) {
                     return Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: Text(
                         'No tracklist available yet.',
                         style: theme.textTheme.bodyMedium?.copyWith(
@@ -275,8 +276,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   return Column(
                     children: docs.map((d) {
                       final data = d.data();
-                      final trackNum =
-                          (data['position'] as num?)?.toInt() ?? 0;
+                      final trackNum = (data['position'] as num?)?.toInt() ?? 0;
                       final disc = (data['disc'] as num?)?.toInt() ?? 1;
 
                       final tTitle =
@@ -294,19 +294,17 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                             '$minutes:${seconds.toString().padLeft(2, '0')}';
                       }
 
-                      final discPrefix =
-                          hasMultipleDiscs ? 'Disc $disc · ' : '';
+                      final discPrefix = hasMultipleDiscs ? 'Disc $disc - ' : '';
 
                       return Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 10),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
                             SizedBox(
                               width: 24,
                               child: Text(
-                                trackNum.toString(), // "1" not "01"
+                                trackNum.toString(),
                                 textAlign: TextAlign.center,
                                 style: theme.textTheme.bodyMedium?.copyWith(
                                   fontWeight: FontWeight.w600,
@@ -320,17 +318,15 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                                 children: [
                                   Text(
                                     tTitle,
-                                    style: theme.textTheme.titleMedium
-                                        ?.copyWith(fontSize: 16),
+                                    style: theme.textTheme.titleMedium?.copyWith(fontSize: 16),
                                     overflow: TextOverflow.ellipsis,
                                   ),
                                   if (discPrefix.isNotEmpty)
                                     Text(
                                       discPrefix,
-                                      style: theme.textTheme.bodySmall
-                                          ?.copyWith(
-                                              color:
-                                                  theme.colorScheme.outline),
+                                      style: theme.textTheme.bodySmall?.copyWith(
+                                        color: theme.colorScheme.outline,
+                                      ),
                                     ),
                                 ],
                               ),
@@ -353,7 +349,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
               const SizedBox(height: 24),
 
-              // ---------- YOUR REVIEW ----------
               _YourReviewSection(
                 albumRef: albumRef,
                 uid: uid,
@@ -362,7 +357,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
               const SizedBox(height: 24),
 
-              // ---------- COMMUNITY REVIEWS ----------
               _CommunityReviewsSection(
                 albumRef: albumRef,
                 uid: uid,
@@ -400,7 +394,6 @@ class _AlbumArtPlaceholder extends StatelessWidget {
   }
 }
 
-/// Small pill chip used for year / type
 class _InfoChip extends StatelessWidget {
   const _InfoChip({required this.icon, required this.label});
 
@@ -409,21 +402,23 @@ class _InfoChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface.withValues(),
+        color: Colors.white.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 14),
+          Icon(icon, size: 14, color: Colors.white70),
           const SizedBox(width: 4),
           Text(
             label,
-            style: theme.textTheme.labelSmall,
+            style: const TextStyle(
+              fontSize: 12,
+              color: Colors.white70,
+            ),
           ),
         ],
       ),
@@ -431,7 +426,6 @@ class _InfoChip extends StatelessWidget {
   }
 }
 
-/// YOUR REVIEW card
 class _YourReviewSection extends StatelessWidget {
   const _YourReviewSection({
     required this.albumRef,
@@ -453,7 +447,7 @@ class _YourReviewSection extends StatelessWidget {
       builder: (context, reviewSnap) {
         if (reviewSnap.hasError) {
           return Center(
-            child: Text('Couldn’t load your review: ${reviewSnap.error}'),
+            child: Text('Could not load your review: ${reviewSnap.error}'),
           );
         }
 
@@ -464,8 +458,7 @@ class _YourReviewSection extends StatelessWidget {
         final review = reviewSnap.data?.data();
         final hasReview = review != null;
 
-        final rating =
-            hasReview ? (review['rating'] as num? ?? 0).toDouble() : 0.0;
+        final rating = hasReview ? (review['rating'] as num? ?? 0).toDouble() : 0.0;
         final text = hasReview ? (review['text'] as String? ?? '') : '';
 
         return Padding(
@@ -478,8 +471,7 @@ class _YourReviewSection extends StatelessWidget {
                 children: [
                   Text(
                     'Your review',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w600),
+                    style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
                   if (hasReview) ...[
@@ -498,15 +490,9 @@ class _YourReviewSection extends StatelessWidget {
                     const SizedBox(height: 6),
                     if (text.trim().isNotEmpty) Text(text),
                     if (text.trim().isEmpty)
-                      Text(
-                        '(No written review)',
-                        style: theme.textTheme.bodySmall,
-                      ),
+                      Text('(No written review)', style: theme.textTheme.bodySmall),
                   ] else
-                    Text(
-                      'You haven’t rated this album yet.',
-                      style: theme.textTheme.bodyMedium,
-                    ),
+                    Text('You have not rated this album yet.', style: theme.textTheme.bodyMedium),
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -523,11 +509,7 @@ class _YourReviewSection extends StatelessWidget {
                           );
                         },
                         icon: const Icon(Icons.rate_review),
-                        label: Text(
-                          hasReview
-                              ? 'Edit rating / review'
-                              : 'Rate this album',
-                        ),
+                        label: Text(hasReview ? 'Edit rating / review' : 'Rate this album'),
                       ),
                       const SizedBox(width: 12),
                       if (hasReview)
@@ -537,17 +519,14 @@ class _YourReviewSection extends StatelessWidget {
                               context: context,
                               builder: (ctx) => AlertDialog(
                                 title: const Text('Delete review?'),
-                                content:
-                                    const Text('This can’t be undone.'),
+                                content: const Text('This cannot be undone.'),
                                 actions: [
                                   TextButton(
-                                    onPressed: () =>
-                                        Navigator.pop(ctx, false),
+                                    onPressed: () => Navigator.pop(ctx, false),
                                     child: const Text('Cancel'),
                                   ),
                                   FilledButton(
-                                    onPressed: () =>
-                                        Navigator.pop(ctx, true),
+                                    onPressed: () => Navigator.pop(ctx, true),
                                     child: const Text('Delete'),
                                   ),
                                 ],
@@ -558,9 +537,7 @@ class _YourReviewSection extends StatelessWidget {
                               await myReviewRef.delete();
                               if (context.mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Review deleted'),
-                                  ),
+                                  const SnackBar(content: Text('Review deleted')),
                                 );
                               }
                             }
@@ -579,7 +556,6 @@ class _YourReviewSection extends StatelessWidget {
   }
 }
 
-/// COMMUNITY REVIEWS & STATS
 class _CommunityReviewsSection extends StatelessWidget {
   const _CommunityReviewsSection({
     required this.albumRef,
@@ -601,9 +577,7 @@ class _CommunityReviewsSection extends StatelessWidget {
           .snapshots(),
       builder: (context, listSnap) {
         if (listSnap.hasError) {
-          return Center(
-            child: Text('Couldn’t load reviews: ${listSnap.error}'),
-          );
+          return Center(child: Text('Could not load reviews: ${listSnap.error}'));
         }
 
         if (listSnap.connectionState == ConnectionState.waiting) {
@@ -637,12 +611,8 @@ class _CommunityReviewsSection extends StatelessWidget {
                     children: [
                       Text('Community reviews: $count'),
                       Text(
-                        avg == null
-                            ? 'Avg: —'
-                            : 'Avg: ${avg.toStringAsFixed(1)}/10',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
+                        avg == null ? 'Avg: -' : 'Avg: ${avg.toStringAsFixed(1)}/10',
+                        style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
                       ),
                     ],
                   ),
@@ -651,8 +621,7 @@ class _CommunityReviewsSection extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 'Recent reviews',
-                style: theme.textTheme.titleLarge
-                    ?.copyWith(fontWeight: FontWeight.w600),
+                style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 10),
               if (docs.isEmpty)
@@ -662,10 +631,8 @@ class _CommunityReviewsSection extends StatelessWidget {
                   children: docs.take(20).map((d) {
                     final data = d.data();
                     final ratingNum = data['rating'];
-                    final rating =
-                        ratingNum is num ? ratingNum.toDouble() : 0.0;
-                    final text =
-                        (data['text'] as String? ?? '').trim();
+                    final rating = ratingNum is num ? ratingNum.toDouble() : 0.0;
+                    final text = (data['text'] as String? ?? '').trim();
                     final who = d.id;
 
                     return Card(
@@ -678,22 +645,13 @@ class _CommunityReviewsSection extends StatelessWidget {
                             const SizedBox(width: 8),
                             Text(
                               '${rating.toStringAsFixed(1)}/10',
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                fontWeight: FontWeight.w600,
-                              ),
+                              style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
                             ),
                           ],
                         ),
                         subtitle: text.isEmpty
-                            ? Text(
-                                '(No written review)',
-                                style: theme.textTheme.bodySmall,
-                              )
-                            : Text(
-                                text,
-                                maxLines: 3,
-                                overflow: TextOverflow.ellipsis,
-                              ),
+                            ? Text('(No written review)', style: theme.textTheme.bodySmall)
+                            : Text(text, maxLines: 3, overflow: TextOverflow.ellipsis),
                         trailing: who == uid
                             ? Text(
                                 'You',
@@ -715,11 +673,10 @@ class _CommunityReviewsSection extends StatelessWidget {
   }
 }
 
-/// Read-only 0–10 → 0–5 stars renderer.
 class RatingStars extends StatelessWidget {
   const RatingStars({super.key, required this.rating, this.size = 18});
 
-  final double rating; // 0–10
+  final double rating;
   final double size;
 
   @override
@@ -734,21 +691,13 @@ class RatingStars extends StatelessWidget {
 
     final icons = <Widget>[];
     for (int i = 0; i < full; i++) {
-      icons.add(
-        Icon(Icons.star, size: size, color: theme.colorScheme.primary),
-      );
+      icons.add(Icon(Icons.star, size: size, color: theme.colorScheme.primary));
     }
     if (hasHalf) {
-      icons.add(
-        Icon(Icons.star_half,
-            size: size, color: theme.colorScheme.primary),
-      );
+      icons.add(Icon(Icons.star_half, size: size, color: theme.colorScheme.primary));
     }
     while (icons.length < 5) {
-      icons.add(
-        Icon(Icons.star_border,
-            size: size, color: theme.colorScheme.primary),
-      );
+      icons.add(Icon(Icons.star_border, size: size, color: theme.colorScheme.primary));
     }
 
     return Row(mainAxisSize: MainAxisSize.min, children: icons);
@@ -762,8 +711,7 @@ class _DisplayNameChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final userRef =
-        FirebaseFirestore.instance.collection('users').doc(uid);
+    final userRef = FirebaseFirestore.instance.collection('users').doc(uid);
 
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: userRef.snapshots(),
@@ -775,43 +723,29 @@ class _DisplayNameChip extends StatelessWidget {
             ? name
             : uid.substring(0, uid.length >= 6 ? 6 : uid.length);
 
-        return Chip(
-          label: Text(display),
-        );
+        return Chip(label: Text(display));
       },
     );
   }
 }
 
-/// Converts an ISO-like date string (YYYY, YYYY-MM, YYYY-MM-DD)
-/// into something like "Nov 4, 1969".
 String? formatReleaseDate(String? iso) {
   if (iso == null || iso.trim().isEmpty) return null;
 
   final trimmed = iso.trim();
 
-  // Try full DateTime parse first (YYYY-MM-DD or full ISO)
   try {
     final dt = DateTime.parse(trimmed);
-    const monthNames = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-    ];
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     final m = monthNames[dt.month - 1];
     return '$m ${dt.day}, ${dt.year}';
-  } catch (_) {
-    // If parse fails, fall back to manual handling below.
-  }
+  } catch (_) {}
 
-  // Fallback: split on "-"
   final parts = trimmed.split('-');
   if (parts.length == 1) {
     return parts[0];
   } else if (parts.length == 2) {
-    const monthNames = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-    ];
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     final year = parts[0];
     final monthIndex = int.tryParse(parts[1]) ?? 1;
     final m = monthNames[(monthIndex - 1).clamp(0, 11)];
