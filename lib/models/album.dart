@@ -10,6 +10,7 @@ class Album {
   final String? firstReleaseDate;
   final String? primaryType;
   final String source;
+  final String? parentAlbumId; // For deluxe/special editions
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
@@ -21,6 +22,7 @@ class Album {
     this.firstReleaseDate,
     this.primaryType,
     this.source = 'musicbrainz',
+    this.parentAlbumId,
     this.createdAt,
     this.updatedAt,
   });
@@ -39,6 +41,7 @@ class Album {
       firstReleaseDate: data['firstReleaseDate'],
       primaryType: data['primaryType'],
       source: data['source'] ?? 'musicbrainz',
+      parentAlbumId: data['parentAlbumId'],
       createdAt: (data['createdAt'] as Timestamp?)?.toDate(),
       updatedAt: (data['updatedAt'] as Timestamp?)?.toDate(),
     );
@@ -53,10 +56,13 @@ class Album {
       'firstReleaseDate': firstReleaseDate ?? '',
       'primaryType': primaryType ?? '',
       'source': source,
+      if (parentAlbumId != null) 'parentAlbumId': parentAlbumId,
       'updatedAt': FieldValue.serverTimestamp(),
       'createdAt': FieldValue.serverTimestamp(),
     };
   }
+
+  bool get isDeluxeOrSpecial => parentAlbumId != null;
 
   Album copyWith({
     String? id,
@@ -66,6 +72,7 @@ class Album {
     String? firstReleaseDate,
     String? primaryType,
     String? source,
+    String? parentAlbumId,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) {
@@ -77,6 +84,7 @@ class Album {
       firstReleaseDate: firstReleaseDate ?? this.firstReleaseDate,
       primaryType: primaryType ?? this.primaryType,
       source: source ?? this.source,
+      parentAlbumId: parentAlbumId ?? this.parentAlbumId,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
@@ -84,11 +92,13 @@ class Album {
 }
 
 class Track {
+  final int disc;
   final int position;
   final String title;
   final double? durationSeconds;
 
   Track({
+    this.disc = 1,
     required this.position,
     required this.title,
     this.durationSeconds,
@@ -101,6 +111,7 @@ class Track {
     }
 
     return Track(
+      disc: data['disc'] ?? 1,
       position: data['position'] ?? 0,
       title: data['title'] ?? '',
       durationSeconds: (data['durationSeconds'] as num?)?.toDouble(),
@@ -109,6 +120,7 @@ class Track {
 
   Map<String, dynamic> toFirestore() {
     return {
+      'disc': disc,
       'position': position,
       'title': title,
       if (durationSeconds != null) 'durationSeconds': durationSeconds,

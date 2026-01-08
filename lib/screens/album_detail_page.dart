@@ -5,7 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:palette_generator/palette_generator.dart';
 
-import 'package:music_all_app/services/recently_viewed_service.dart';
+import '../services/recently_viewed_service.dart';
 import 'artist_detail_page.dart';
 import 'review_editor_page.dart';
 
@@ -23,29 +23,28 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   String? _paletteForCoverUrl;
 
   Future<void> _generatePalette(String coverUrl, ThemeData theme) async {
-  if (coverUrl.isEmpty) return;
-  if (_paletteForCoverUrl == coverUrl && _dominantColor != null) return;
+    if (coverUrl.isEmpty) return;
+    if (_paletteForCoverUrl == coverUrl && _dominantColor != null) return;
 
-  try {
-    final palette = await PaletteGenerator.fromImageProvider(
-      NetworkImage(coverUrl),
-      maximumColorCount: 20,
-    );
+    try {
+      final palette = await PaletteGenerator.fromImageProvider(
+        NetworkImage(coverUrl),
+        maximumColorCount: 20,
+      );
 
-    // Prefer vibrant colors over dark/muted ones
-    final color = palette.vibrantColor?.color ??
-        palette.lightVibrantColor?.color ??
-        palette.mutedColor?.color ??
-        palette.dominantColor?.color ??
-        theme.colorScheme.primary;
+      final color = palette.vibrantColor?.color ??
+          palette.lightVibrantColor?.color ??
+          palette.mutedColor?.color ??
+          palette.dominantColor?.color ??
+          theme.colorScheme.primary;
 
-    if (!mounted) return;
-    setState(() {
-      _paletteForCoverUrl = coverUrl;
-      _dominantColor = color;
-    });
-  } catch (_) {}
-}
+      if (!mounted) return;
+      setState(() {
+        _paletteForCoverUrl = coverUrl;
+        _dominantColor = color;
+      });
+    } catch (_) {}
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -53,7 +52,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         FirebaseFirestore.instance.collection('albums').doc(widget.albumId);
     final uid = FirebaseAuth.instance.currentUser!.uid;
     final theme = Theme.of(context);
-
 
     return Scaffold(
       appBar: AppBar(title: const Text('Album')),
@@ -66,7 +64,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
             );
           }
 
-          if (albumSnap.connectionState == ConnectionState.waiting) {
+          if (!albumSnap.hasData) {
             return const Center(child: CircularProgressIndicator());
           }
 
@@ -95,7 +93,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
           final releaseLabel = formatReleaseDate(firstReleaseDate);
           final baseColor = _dominantColor ?? theme.colorScheme.surface;
-          
+
           final darkenedColor = Color.lerp(baseColor, Colors.black, 0.4)!;
           final bottomColor = theme.colorScheme.surface;
 
@@ -147,7 +145,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                       ),
                     ),
                     const SizedBox(height: 20),
-
                     Text(
                       title,
                       textAlign: TextAlign.center,
@@ -163,7 +160,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                       ),
                     ),
                     const SizedBox(height: 8),
-
                     if (primaryArtistId.isNotEmpty)
                       GestureDetector(
                         onTap: () {
@@ -196,7 +192,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                         ),
                       ),
                     const SizedBox(height: 14),
-
                     Wrap(
                       spacing: 8,
                       runSpacing: 4,
@@ -217,10 +212,10 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   ],
                 ),
               ),
-
               const Divider(height: 1),
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 child: Text(
                   'Tracklist',
                   style: theme.textTheme.titleLarge?.copyWith(
@@ -228,16 +223,18 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   ),
                 ),
               ),
-
               StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: albumRef
                     .collection('tracks')
+                    .orderBy('disc')
                     .orderBy('position')
                     .snapshots(),
                 builder: (context, snap) {
                   if (snap.hasError) {
+                    debugPrint('Tracklist error: ${snap.error}');
                     return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
                       child: Text(
                         'Could not load tracklist.',
                         style: theme.textTheme.bodyMedium?.copyWith(
@@ -247,7 +244,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                     );
                   }
 
-                  if (snap.connectionState == ConnectionState.waiting) {
+                  if (!snap.hasData) {
                     return const Padding(
                       padding: EdgeInsets.symmetric(vertical: 12),
                       child: Center(
@@ -259,7 +256,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   final docs = snap.data?.docs ?? [];
                   if (docs.isEmpty) {
                     return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
                       child: Text(
                         'No tracklist available yet.',
                         style: theme.textTheme.bodyMedium?.copyWith(
@@ -277,7 +275,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   return Column(
                     children: docs.map((d) {
                       final data = d.data();
-                      final trackNum = (data['position'] as num?)?.toInt() ?? 0;
+                      final trackNum =
+                          (data['position'] as num?)?.toInt() ?? 0;
                       final disc = (data['disc'] as num?)?.toInt() ?? 1;
 
                       final tTitle =
@@ -295,10 +294,12 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                             '$minutes:${seconds.toString().padLeft(2, '0')}';
                       }
 
-                      final discPrefix = hasMultipleDiscs ? 'Disc $disc - ' : '';
+                      final discPrefix =
+                          hasMultipleDiscs ? 'Disc $disc - ' : '';
 
                       return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
@@ -319,7 +320,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                                 children: [
                                   Text(
                                     tTitle,
-                                    style: theme.textTheme.titleMedium?.copyWith(fontSize: 16),
+                                    style: theme.textTheme.titleMedium
+                                        ?.copyWith(fontSize: 16),
                                     overflow: TextOverflow.ellipsis,
                                   ),
                                   if (discPrefix.isNotEmpty)
@@ -347,17 +349,13 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   );
                 },
               ),
-
               const SizedBox(height: 24),
-
               _YourReviewSection(
                 albumRef: albumRef,
                 uid: uid,
                 albumId: widget.albumId,
               ),
-
               const SizedBox(height: 24),
-
               _CommunityReviewsSection(
                 albumRef: albumRef,
                 uid: uid,
@@ -379,8 +377,9 @@ class _AlbumArtPlaceholder extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final initial =
-        title.trim().isEmpty ? '?' : title.trim().characters.first.toUpperCase();
+    final initial = title.trim().isEmpty
+        ? '?'
+        : title.trim().characters.first.toUpperCase();
 
     return Container(
       color: theme.colorScheme.surfaceContainerHighest,
@@ -452,14 +451,15 @@ class _YourReviewSection extends StatelessWidget {
           );
         }
 
-        if (reviewSnap.connectionState == ConnectionState.waiting) {
+        if (!reviewSnap.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
 
         final review = reviewSnap.data?.data();
         final hasReview = review != null;
 
-        final rating = hasReview ? (review['rating'] as num? ?? 0).toDouble() : 0.0;
+        final rating =
+            hasReview ? (review['rating'] as num? ?? 0).toDouble() : 0.0;
         final text = hasReview ? (review['text'] as String? ?? '') : '';
 
         return Padding(
@@ -472,7 +472,8 @@ class _YourReviewSection extends StatelessWidget {
                 children: [
                   Text(
                     'Your review',
-                    style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
                   if (hasReview) ...[
@@ -491,9 +492,11 @@ class _YourReviewSection extends StatelessWidget {
                     const SizedBox(height: 6),
                     if (text.trim().isNotEmpty) Text(text),
                     if (text.trim().isEmpty)
-                      Text('(No written review)', style: theme.textTheme.bodySmall),
+                      Text('(No written review)',
+                          style: theme.textTheme.bodySmall),
                   ] else
-                    Text('You have not rated this album yet.', style: theme.textTheme.bodyMedium),
+                    Text('You have not rated this album yet.',
+                        style: theme.textTheme.bodyMedium),
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -510,7 +513,9 @@ class _YourReviewSection extends StatelessWidget {
                           );
                         },
                         icon: const Icon(Icons.rate_review),
-                        label: Text(hasReview ? 'Edit rating / review' : 'Rate this album'),
+                        label: Text(hasReview
+                            ? 'Edit rating / review'
+                            : 'Rate this album'),
                       ),
                       const SizedBox(width: 12),
                       if (hasReview)
@@ -578,10 +583,11 @@ class _CommunityReviewsSection extends StatelessWidget {
           .snapshots(),
       builder: (context, listSnap) {
         if (listSnap.hasError) {
-          return Center(child: Text('Could not load reviews: ${listSnap.error}'));
+          return Center(
+              child: Text('Could not load reviews: ${listSnap.error}'));
         }
 
-        if (listSnap.connectionState == ConnectionState.waiting) {
+        if (!listSnap.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
 
@@ -612,8 +618,11 @@ class _CommunityReviewsSection extends StatelessWidget {
                     children: [
                       Text('Community reviews: $count'),
                       Text(
-                        avg == null ? 'Avg: -' : 'Avg: ${avg.toStringAsFixed(1)}/10',
-                        style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                        avg == null
+                            ? 'Avg: -'
+                            : 'Avg: ${avg.toStringAsFixed(1)}/10',
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
                       ),
                     ],
                   ),
@@ -622,7 +631,8 @@ class _CommunityReviewsSection extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 'Recent reviews',
-                style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w600),
+                style: theme.textTheme.titleLarge
+                    ?.copyWith(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 10),
               if (docs.isEmpty)
@@ -632,7 +642,8 @@ class _CommunityReviewsSection extends StatelessWidget {
                   children: docs.take(20).map((d) {
                     final data = d.data();
                     final ratingNum = data['rating'];
-                    final rating = ratingNum is num ? ratingNum.toDouble() : 0.0;
+                    final rating =
+                        ratingNum is num ? ratingNum.toDouble() : 0.0;
                     final text = (data['text'] as String? ?? '').trim();
                     final who = d.id;
 
@@ -646,13 +657,16 @@ class _CommunityReviewsSection extends StatelessWidget {
                             const SizedBox(width: 8),
                             Text(
                               '${rating.toStringAsFixed(1)}/10',
-                              style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                              style: theme.textTheme.bodyMedium
+                                  ?.copyWith(fontWeight: FontWeight.w600),
                             ),
                           ],
                         ),
                         subtitle: text.isEmpty
-                            ? Text('(No written review)', style: theme.textTheme.bodySmall)
-                            : Text(text, maxLines: 3, overflow: TextOverflow.ellipsis),
+                            ? Text('(No written review)',
+                                style: theme.textTheme.bodySmall)
+                            : Text(text,
+                                maxLines: 3, overflow: TextOverflow.ellipsis),
                         trailing: who == uid
                             ? Text(
                                 'You',
@@ -695,10 +709,12 @@ class RatingStars extends StatelessWidget {
       icons.add(Icon(Icons.star, size: size, color: theme.colorScheme.primary));
     }
     if (hasHalf) {
-      icons.add(Icon(Icons.star_half, size: size, color: theme.colorScheme.primary));
+      icons.add(
+          Icon(Icons.star_half, size: size, color: theme.colorScheme.primary));
     }
     while (icons.length < 5) {
-      icons.add(Icon(Icons.star_border, size: size, color: theme.colorScheme.primary));
+      icons.add(Icon(Icons.star_border,
+          size: size, color: theme.colorScheme.primary));
     }
 
     return Row(mainAxisSize: MainAxisSize.min, children: icons);
@@ -737,7 +753,20 @@ String? formatReleaseDate(String? iso) {
 
   try {
     final dt = DateTime.parse(trimmed);
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthNames = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
+    ];
     final m = monthNames[dt.month - 1];
     return '$m ${dt.day}, ${dt.year}';
   } catch (_) {}
@@ -746,7 +775,20 @@ String? formatReleaseDate(String? iso) {
   if (parts.length == 1) {
     return parts[0];
   } else if (parts.length == 2) {
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthNames = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
+    ];
     final year = parts[0];
     final monthIndex = int.tryParse(parts[1]) ?? 1;
     final m = monthNames[(monthIndex - 1).clamp(0, 11)];
