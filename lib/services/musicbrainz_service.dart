@@ -10,6 +10,7 @@ class MbReleaseGroup {
     required this.primaryArtistName,
     this.firstReleaseDate,
     this.primaryType,
+    this.score,
   });
 
   final String id;
@@ -18,6 +19,26 @@ class MbReleaseGroup {
   final String primaryArtistName;
   final String? firstReleaseDate;
   final String? primaryType;
+  final int? score; // MusicBrainz relevance score (0-100)
+}
+
+/// Artist search result from MusicBrainz
+class MbArtistSearchResult {
+  MbArtistSearchResult({
+    required this.id,
+    required this.name,
+    this.type,
+    this.country,
+    this.score,
+    this.disambiguation,
+  });
+
+  final String id;
+  final String name;
+  final String? type;
+  final String? country;
+  final int? score;
+  final String? disambiguation;
 }
 
 /// Artist details from MusicBrainz
@@ -84,10 +105,11 @@ class MusicBrainzService {
     final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
     final list = (decoded['release-groups'] as List<dynamic>? ?? []);
 
-    return list.map((raw) {
+    final results = list.map((raw) {
       final m = raw as Map<String, dynamic>;
       final title = (m['title'] as String?) ?? '';
       final id = (m['id'] as String?) ?? '';
+      final score = m['score'] as int?;
 
       String artistName = '';
       String? artistId;
@@ -112,8 +134,60 @@ class MusicBrainzService {
         primaryArtistName: artistName,
         firstReleaseDate: m['first-release-date'] as String?,
         primaryType: m['primary-type'] as String?,
+        score: score,
       );
     }).where((r) => r.id.isNotEmpty && r.title.isNotEmpty).toList();
+
+    // Sort by score (highest first) - MusicBrainz relevance
+    results.sort((a, b) => (b.score ?? 0).compareTo(a.score ?? 0));
+
+    return results;
+  }
+
+  /// Search for artists
+  Future<List<MbArtistSearchResult>> searchArtists(String query) async {
+    final q = query.trim();
+    if (q.isEmpty) return [];
+
+    final lucene = Uri.encodeQueryComponent(q);
+    final url = Uri.parse(
+      'https://musicbrainz.org/ws/2/artist/?query=$lucene&fmt=json&limit=15',
+    );
+
+    final resp = await _client.get(
+      url,
+      headers: {
+        'User-Agent': appUserAgent,
+        'Accept': 'application/json',
+      },
+    );
+
+    if (resp.statusCode == 503) {
+      throw Exception('MusicBrainz rate limit (503). Try again in a moment.');
+    }
+    if (resp.statusCode != 200) {
+      throw Exception('MusicBrainz error: ${resp.statusCode}');
+    }
+
+    final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
+    final list = (decoded['artists'] as List<dynamic>? ?? []);
+
+    final results = list.map((raw) {
+      final m = raw as Map<String, dynamic>;
+      return MbArtistSearchResult(
+        id: (m['id'] as String?) ?? '',
+        name: (m['name'] as String?) ?? '',
+        type: m['type'] as String?,
+        country: m['country'] as String?,
+        score: m['score'] as int?,
+        disambiguation: m['disambiguation'] as String?,
+      );
+    }).where((r) => r.id.isNotEmpty && r.name.isNotEmpty).toList();
+
+    // Sort by score
+    results.sort((a, b) => (b.score ?? 0).compareTo(a.score ?? 0));
+
+    return results;
   }
 
   /// Fetch artist details by MBID
@@ -146,32 +220,32 @@ class MusicBrainzService {
     );
   }
 
-static Future<List<Map<String, dynamic>>> fetchArtistReleaseGroups(String artistId) async {
-  if (artistId.isEmpty) return [];
+  static Future<List<Map<String, dynamic>>> fetchArtistReleaseGroups(String artistId) async {
+    if (artistId.isEmpty) return [];
 
-  final url = Uri.parse(
-    'https://musicbrainz.org/ws/2/release-group?artist=$artistId&type=album|ep|single&fmt=json&limit=100',
-  );
+    final url = Uri.parse(
+      'https://musicbrainz.org/ws/2/release-group?artist=$artistId&type=album|ep|single&fmt=json&limit=100',
+    );
 
-  final resp = await http.get(url, headers: {
-    'User-Agent': 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
-    'Accept': 'application/json',
-  });
+    final resp = await http.get(url, headers: {
+      'User-Agent': 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
+      'Accept': 'application/json',
+    });
 
-  if (resp.statusCode != 200) return [];
+    if (resp.statusCode != 200) return [];
 
-  final data = jsonDecode(resp.body) as Map<String, dynamic>;
-  final groups = data['release-groups'] as List<dynamic>? ?? [];
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    final groups = data['release-groups'] as List<dynamic>? ?? [];
 
-  return groups.map((g) {
-    final m = g as Map<String, dynamic>;
-    return {
-      'id': m['id'] as String? ?? '',
-      'title': m['title'] as String? ?? '',
-      'primaryType': m['primary-type'] as String?,
-      'secondaryTypes': m['secondary-types'] as List?,
-      'firstReleaseDate': m['first-release-date'] as String?,
-    };
-  }).where((m) => (m['id'] as String).isNotEmpty).toList();
- }
+    return groups.map((g) {
+      final m = g as Map<String, dynamic>;
+      return {
+        'id': m['id'] as String? ?? '',
+        'title': m['title'] as String? ?? '',
+        'primaryType': m['primary-type'] as String?,
+        'secondaryTypes': m['secondary-types'] as List?,
+        'firstReleaseDate': m['first-release-date'] as String?,
+      };
+    }).where((m) => (m['id'] as String).isNotEmpty).toList();
+  }
 }
