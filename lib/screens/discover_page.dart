@@ -3,6 +3,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import '../widgets/album_thumb.dart';
 import '../services/musicbrainz_service.dart';
 import '../services/lastfm_service.dart';
@@ -25,8 +26,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
     appUserAgent: 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
   );
 
-  // TODO: Move API key to environment config
-  final _lastFmService = LastFmService(apiKey: '776ae2dc0af5e34f970aaf5e50c30fc7');
+  late final LastFmService _lastFmService;
 
   final _controller = TextEditingController();
   Timer? _debounce;
@@ -39,6 +39,14 @@ class _DiscoverPageState extends State<DiscoverPage> {
   List<MbReleaseGroup> _albumResults = const [];
   List<MbArtistSearchResult> _artistResults = const [];
   Map<String, int> _listenerCounts = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _lastFmService = LastFmService(
+      apiKey: dotenv.env['LASTFM_API_KEY'] ?? '',
+    );
+  }
 
   @override
   void dispose() {
@@ -82,7 +90,6 @@ class _DiscoverPageState extends State<DiscoverPage> {
           _loading = false;
         });
 
-        // Fetch popularity in background
         _fetchAlbumPopularity(res);
       } else {
         final res = await _mbService.searchArtists(query);
@@ -92,7 +99,6 @@ class _DiscoverPageState extends State<DiscoverPage> {
           _loading = false;
         });
 
-        // Fetch popularity in background
         _fetchArtistPopularity(res);
       }
     } catch (e) {
@@ -131,7 +137,6 @@ class _DiscoverPageState extends State<DiscoverPage> {
         _listenerCounts = counts;
         _loadingPopularity = false;
 
-        // Re-sort by popularity
         _albumResults = List.from(_albumResults)
           ..sort((a, b) {
             final aCount = _listenerCounts[a.id] ?? 0;
@@ -151,9 +156,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
     setState(() => _loadingPopularity = true);
 
     try {
-      final artistList = artists
-          .map((a) => (name: a.name, id: a.id))
-          .toList();
+      final artistList = artists.map((a) => (name: a.name, id: a.id)).toList();
 
       final counts = await _lastFmService.getArtistListenerCounts(artistList);
 
@@ -162,7 +165,6 @@ class _DiscoverPageState extends State<DiscoverPage> {
         _listenerCounts = counts;
         _loadingPopularity = false;
 
-        // Re-sort by popularity
         _artistResults = List.from(_artistResults)
           ..sort((a, b) {
             final aCount = _listenerCounts[a.id] ?? 0;
@@ -248,7 +250,6 @@ class _DiscoverPageState extends State<DiscoverPage> {
       ),
       body: Column(
         children: [
-          // Search bar
           Container(
             color: theme.colorScheme.surface,
             padding: const EdgeInsets.all(12),
@@ -280,8 +281,6 @@ class _DiscoverPageState extends State<DiscoverPage> {
               ),
             ),
           ),
-
-          // Search mode toggle
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(
@@ -306,16 +305,12 @@ class _DiscoverPageState extends State<DiscoverPage> {
               ],
             ),
           ),
-
-          // Loading indicator
           if (_loading) const LinearProgressIndicator(),
           if (_loadingPopularity && !_loading)
             LinearProgressIndicator(
               backgroundColor: theme.colorScheme.surfaceContainerHighest,
               color: theme.colorScheme.primary.withValues(alpha: 0.5),
             ),
-
-          // Error message
           if (_error != null)
             Container(
               width: double.infinity,
@@ -339,8 +334,6 @@ class _DiscoverPageState extends State<DiscoverPage> {
                 ],
               ),
             ),
-
-          // Results
           Expanded(
             child: _searchMode == SearchMode.albums
                 ? _buildAlbumResults(theme)

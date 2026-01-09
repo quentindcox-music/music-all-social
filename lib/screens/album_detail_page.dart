@@ -177,7 +177,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                           textAlign: TextAlign.center,
                           style: theme.textTheme.titleLarge?.copyWith(
                             fontWeight: FontWeight.w800,
-                            color: Colors.purple.withValues(alpha: 0.95),
+                            color: Colors.deepPurpleAccent.withValues(alpha: 0.95),
                             letterSpacing: 0.3,
                           ),
                         ),
@@ -188,7 +188,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                         textAlign: TextAlign.center,
                         style: theme.textTheme.titleLarge?.copyWith(
                           fontWeight: FontWeight.w800,
-                          color: Colors.purple.withValues(alpha: 0.95),
+                          color: Colors.deepPurpleAccent.withValues(alpha: 0.95),
                         ),
                       ),
                     const SizedBox(height: 14),
