@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'dart:async';
 
 /// Minimal album-ish result from MusicBrainz Release Group search.
 class MbReleaseGroup {
@@ -247,5 +248,179 @@ class MusicBrainzService {
         'firstReleaseDate': m['first-release-date'] as String?,
       };
     }).where((m) => (m['id'] as String).isNotEmpty).toList();
+  }
+    // ---------------------------
+  // Tracklist helpers
+  // ---------------------------
+
+  static const String _mbBase = 'https://musicbrainz.org/ws/2';
+
+  static Map<String, String> _mbHeaders({String? userAgent}) => {
+        'User-Agent': userAgent ??
+            'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
+        'Accept': 'application/json',
+      };
+
+  static int _dateScore(String? date) {
+    // Lower is better (earlier). Unknown dates are "worst".
+    if (date == null || date.trim().isEmpty) return 99999999;
+    final parts = date.trim().split('-');
+    final y = int.tryParse(parts[0]) ?? 9999;
+    final m = parts.length > 1 ? int.tryParse(parts[1]) ?? 12 : 12;
+    final d = parts.length > 2 ? int.tryParse(parts[2]) ?? 28 : 28;
+    return y * 10000 + m * 100 + d;
+  }
+
+  static Map<String, dynamic>? _pickBestRelease(List releases) {
+    // Prefer Official; then earliest date; else first.
+    Map<String, dynamic>? best;
+    int bestRank = 1 << 30;
+
+    for (final r in releases) {
+      if (r is! Map) continue;
+      final status = (r['status'] as String?)?.toLowerCase();
+      final date = r['date'] as String?;
+      final isOfficial = status == 'official';
+
+      final rank = (isOfficial ? 0 : 1) * 100000000 + _dateScore(date);
+      if (rank < bestRank) {
+        bestRank = rank;
+        best = Map<String, dynamic>.from(r);
+      }
+    }
+
+    if (best != null) return best;
+    if (releases.isNotEmpty && releases.first is Map) {
+      return Map<String, dynamic>.from(releases.first as Map);
+    }
+    return null;
+  }
+
+  /// Fetch releases for a release-group (needed to pick a release for tracklist)
+  static Future<List<Map<String, dynamic>>> fetchReleaseGroupReleases(
+    String releaseGroupId, {
+    String? userAgent,
+  }) async {
+    if (releaseGroupId.isEmpty) return [];
+
+    final url = Uri.parse(
+      '$_mbBase/release-group/$releaseGroupId?fmt=json&inc=releases',
+    );
+
+    final resp = await http.get(url, headers: _mbHeaders(userAgent: userAgent));
+
+    if (resp.statusCode == 503) {
+      throw Exception('MusicBrainz rate limit (503). Try again in a moment.');
+    }
+    if (resp.statusCode != 200) {
+      throw Exception('MusicBrainz error: ${resp.statusCode}');
+    }
+
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    final releases = (data['releases'] as List?) ?? const [];
+    return releases
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
+  /// Fetch a release with recordings and return normalized tracks
+  /// Output maps match what your AlbumDetailPage already expects:
+  /// { title, disc, position, durationSeconds, recordingId }
+  static Future<List<Map<String, dynamic>>> fetchReleaseTracklist(
+    String releaseId, {
+    String? userAgent,
+  }) async {
+    if (releaseId.isEmpty) return [];
+
+    final url = Uri.parse(
+      '$_mbBase/release/$releaseId?fmt=json&inc=recordings',
+    );
+
+    final resp = await http.get(url, headers: _mbHeaders(userAgent: userAgent));
+
+    if (resp.statusCode == 503) {
+      throw Exception('MusicBrainz rate limit (503). Try again in a moment.');
+    }
+    if (resp.statusCode != 200) {
+      throw Exception('MusicBrainz error: ${resp.statusCode}');
+    }
+
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    final media = (data['media'] as List?) ?? const [];
+
+    final tracksOut = <Map<String, dynamic>>[];
+
+    for (final m in media) {
+      if (m is! Map) continue;
+
+      final discNum = (m['position'] as num?)?.toInt() ?? 1;
+      final tracks = (m['tracks'] as List?) ?? const [];
+
+      for (final t in tracks) {
+        if (t is! Map) continue;
+
+        final pos = (t['position'] as num?)?.toInt() ?? 0;
+        final title = (t['title'] as String?)?.trim();
+        final lengthMs = (t['length'] as num?)?.toInt();
+
+        final rec = t['recording'];
+        final recordingId = rec is Map ? rec['id'] as String? : null;
+
+        final durationSeconds =
+            lengthMs == null ? null : (lengthMs / 1000.0).round();
+
+        tracksOut.add({
+          'title': (title != null && title.isNotEmpty) ? title : 'Untitled track',
+          'disc': discNum,
+          'position': pos,
+          if (durationSeconds != null) 'durationSeconds': durationSeconds,
+          if (recordingId != null) 'recordingId': recordingId,
+        });
+      }
+    }
+
+    tracksOut.sort((a, b) {
+      final da = (a['disc'] as int?) ?? 1;
+      final db = (b['disc'] as int?) ?? 1;
+      if (da != db) return da.compareTo(db);
+      final pa = (a['position'] as int?) ?? 0;
+      final pb = (b['position'] as int?) ?? 0;
+      return pa.compareTo(pb);
+    });
+
+    return tracksOut;
+  }
+
+  /// Convenience: release-group -> choose release -> fetch tracklist
+  static Future<({String releaseId, List<Map<String, dynamic>> tracks})>
+      fetchTracklistForReleaseGroup(
+    String releaseGroupId, {
+    String? userAgent,
+  }) async {
+    final releases = await fetchReleaseGroupReleases(
+      releaseGroupId,
+      userAgent: userAgent,
+    );
+
+    // MusicBrainz is rate-limited; be polite between calls.
+    await Future.delayed(const Duration(milliseconds: 1100));
+
+    final best = _pickBestRelease(releases);
+    if (best == null) {
+      throw Exception('No releases found for release-group $releaseGroupId');
+    }
+
+    final releaseId = best['id'] as String?;
+    if (releaseId == null || releaseId.isEmpty) {
+      throw Exception('Could not determine release id for $releaseGroupId');
+    }
+
+    final tracks = await fetchReleaseTracklist(
+      releaseId,
+      userAgent: userAgent,
+    );
+
+    return (releaseId: releaseId, tracks: tracks);
   }
 }

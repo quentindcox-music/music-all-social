@@ -1,17 +1,21 @@
 // lib/screens/album_detail_page.dart
 
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:palette_generator/palette_generator.dart';
 
 import '../services/recently_viewed_service.dart';
+import '../services/musicbrainz_service.dart';
 import 'artist_detail_page.dart';
 import 'review_editor_page.dart';
 
 class AlbumDetailPage extends StatefulWidget {
   const AlbumDetailPage({super.key, required this.albumId});
 
+  /// This is a MusicBrainz *release-group* id (same as your album doc id in Firestore).
   final String albumId;
 
   @override
@@ -19,6 +23,7 @@ class AlbumDetailPage extends StatefulWidget {
 }
 
 class _AlbumDetailPageState extends State<AlbumDetailPage> {
+  // Palette / gradient
   Color? _dominantColor;
   String? _paletteForCoverUrl;
 
@@ -46,11 +51,136 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     } catch (_) {}
   }
 
+  // Track sync state
+  bool _syncingTracks = false;
+  String? _trackSyncError;
+  bool _trackSyncTriggered = false;
+
+  Future<bool> _shouldSyncTracks(
+    DocumentReference<Map<String, dynamic>> albumRef, {
+    Duration ttl = const Duration(days: 7),
+  }) async {
+    // If no tracks exist, sync.
+    final existing = await albumRef.collection('tracks').limit(1).get();
+    if (existing.docs.isEmpty) return true;
+
+    // TTL-based sync
+    final albumSnap = await albumRef.get();
+    final ts = albumSnap.data()?['lastTracksSyncAt'] as Timestamp?;
+    if (ts == null) return true;
+
+    return DateTime.now().difference(ts.toDate()) > ttl;
+  }
+
+  Future<void> _syncTracklist(
+    DocumentReference<Map<String, dynamic>> albumRef, {
+    bool force = false,
+  }) async {
+    if (_syncingTracks) return;
+
+    try {
+      if (!force) {
+        final should = await _shouldSyncTracks(albumRef);
+        if (!should) return;
+      }
+
+      if (mounted) {
+        setState(() {
+          _syncingTracks = true;
+          _trackSyncError = null;
+        });
+      }
+
+      // widget.albumId is a release-group id
+      final result = await MusicBrainzService.fetchTracklistForReleaseGroup(
+        widget.albumId,
+        userAgent: 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
+      );
+
+      // Save chosen release + last sync timestamp on album doc
+      await albumRef.set({
+        'primaryReleaseId': result.releaseId,
+        'lastTracksSyncAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // Optional: clean old tracks (prevents stale duplicates when release changes)
+      // Comment out if you prefer "merge only".
+      final old = await albumRef.collection('tracks').get();
+      if (old.docs.isNotEmpty) {
+        WriteBatch delBatch = FirebaseFirestore.instance.batch();
+        int delCount = 0;
+        for (final d in old.docs) {
+          delBatch.delete(d.reference);
+          delCount++;
+          if (delCount >= 450) {
+            await delBatch.commit();
+            delBatch = FirebaseFirestore.instance.batch();
+            delCount = 0;
+          }
+        }
+        if (delCount > 0) await delBatch.commit();
+      }
+
+      // Write tracks into albums/{albumId}/tracks
+      WriteBatch batch = FirebaseFirestore.instance.batch();
+      int count = 0;
+
+      Future<void> commit({bool forceCommit = false}) async {
+        if (count == 0) return;
+        if (forceCommit || count >= 450) {
+          await batch.commit();
+          batch = FirebaseFirestore.instance.batch();
+          count = 0;
+        }
+      }
+
+      for (final t in result.tracks) {
+        final disc = (t['disc'] as int?) ?? 1;
+        final pos = (t['position'] as int?) ?? 0;
+
+        // Stable per disc/position
+        final trackId = 'd$disc-p$pos';
+
+        final ref = albumRef.collection('tracks').doc(trackId);
+        batch.set(
+          ref,
+          {
+            'id': trackId,
+            'title': (t['title'] as String?)?.trim().isNotEmpty == true
+                ? (t['title'] as String).trim()
+                : 'Untitled track',
+            'disc': disc,
+            'position': pos,
+            if (t['durationSeconds'] != null)
+              'durationSeconds': t['durationSeconds'],
+            if (t['recordingId'] != null) 'recordingId': t['recordingId'],
+            'updatedAt': FieldValue.serverTimestamp(),
+            'source': 'musicbrainz',
+          },
+          SetOptions(merge: true),
+        );
+
+        count++;
+        await commit();
+      }
+
+      await commit(forceCommit: true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _trackSyncError = e.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _syncingTracks = false);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final albumRef =
         FirebaseFirestore.instance.collection('albums').doc(widget.albumId);
-    final uid = FirebaseAuth.instance.currentUser!.uid;
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     final theme = Theme.of(context);
 
     return Scaffold(
@@ -75,21 +205,35 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
           final title = (album['title'] ?? '') as String;
           final artist = (album['primaryArtistName'] ?? '') as String;
-          final primaryArtistId = (album['primaryArtistId'] as String?) ?? '';
+
+          // Support both legacy and new field names.
+          final primaryArtistId = (album['primaryArtistId'] as String?) ??
+              (album['primaryArtistID'] as String?) ??
+              '';
+
           final firstReleaseDate = (album['firstReleaseDate'] ?? '') as String?;
           final primaryType = (album['primaryType'] ?? '') as String?;
           final coverUrl = (album['coverUrl'] as String?)?.trim() ?? '';
 
-          RecentlyViewedService.markAlbumViewed(
-            uid: uid,
-            albumId: widget.albumId,
-            title: title,
-            primaryArtistName: artist,
-            primaryArtistId: primaryArtistId,
-            coverUrl: coverUrl,
-          );
+          if (uid.isNotEmpty) {
+            RecentlyViewedService.markAlbumViewed(
+              uid: uid,
+              albumId: widget.albumId,
+              title: title,
+              primaryArtistName: artist,
+              primaryArtistId: primaryArtistId,
+              coverUrl: coverUrl,
+            );
+          }
 
           _generatePalette(coverUrl, theme);
+
+          // Trigger background track sync once per page open.
+          if (!_trackSyncTriggered) {
+            _trackSyncTriggered = true;
+            // ignore: discarded_futures
+            _syncTracklist(albumRef);
+          }
 
           final releaseLabel = formatReleaseDate(firstReleaseDate);
           final baseColor = _dominantColor ?? theme.colorScheme.surface;
@@ -100,6 +244,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
           return ListView(
             padding: EdgeInsets.zero,
             children: [
+              // Hero area
               Container(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
                 decoration: BoxDecoration(
@@ -177,7 +322,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                           textAlign: TextAlign.center,
                           style: theme.textTheme.titleLarge?.copyWith(
                             fontWeight: FontWeight.w800,
-                            color: Colors.deepPurpleAccent.withValues(alpha: 0.95),
+                            color:  const Color.fromARGB(255, 146, 106, 255).withValues(alpha: 0.95),
                             letterSpacing: 0.3,
                           ),
                         ),
@@ -188,7 +333,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                         textAlign: TextAlign.center,
                         style: theme.textTheme.titleLarge?.copyWith(
                           fontWeight: FontWeight.w800,
-                          color: Colors.deepPurpleAccent.withValues(alpha: 0.95),
+                          color: const Color.fromARGB(255, 146, 106, 255).withValues(alpha: 0.95),
                         ),
                       ),
                     const SizedBox(height: 14),
@@ -212,17 +357,53 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   ],
                 ),
               ),
+
               const Divider(height: 1),
+
+              // Tracklist Header + Controls
               Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                child: Text(
-                  'Tracklist',
-                  style: theme.textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Tracklist',
+                        style: theme.textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    if (_syncingTracks)
+                      const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    IconButton(
+                      tooltip: 'Refresh tracklist',
+                      onPressed: _syncingTracks
+                          ? null
+                          : () => _syncTracklist(albumRef, force: true),
+                      icon: const Icon(Icons.refresh),
+                    ),
+                  ],
                 ),
               ),
+
+              if (_trackSyncError != null)
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  child: Text(
+                    'Track sync error: $_trackSyncError',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error,
+                    ),
+                  ),
+                ),
+
+              // Tracklist Stream (Firestore-first)
               StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: albumRef
                     .collection('tracks')
@@ -258,11 +439,25 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                     return Padding(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 16, vertical: 8),
-                      child: Text(
-                        'No tracklist available yet.',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: theme.colorScheme.outline,
-                        ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _syncingTracks
+                                ? 'Fetching tracklist…'
+                                : 'No tracklist available yet.',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: theme.colorScheme.outline,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          if (!_syncingTracks)
+                            FilledButton.icon(
+                              onPressed: () => _syncTracklist(albumRef, force: true),
+                              icon: const Icon(Icons.download),
+                              label: const Text('Fetch Tracklist'),
+                            ),
+                        ],
                       ),
                     );
                   }
@@ -349,7 +544,10 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   );
                 },
               ),
+
               const SizedBox(height: 24),
+
+              // Reviews
               _YourReviewSection(
                 albumRef: albumRef,
                 uid: uid,
@@ -543,7 +741,8 @@ class _YourReviewSection extends StatelessWidget {
                               await myReviewRef.delete();
                               if (context.mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Review deleted')),
+                                  const SnackBar(
+                                      content: Text('Review deleted')),
                                 );
                               }
                             }
@@ -666,7 +865,8 @@ class _CommunityReviewsSection extends StatelessWidget {
                             ? Text('(No written review)',
                                 style: theme.textTheme.bodySmall)
                             : Text(text,
-                                maxLines: 3, overflow: TextOverflow.ellipsis),
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis),
                         trailing: who == uid
                             ? Text(
                                 'You',

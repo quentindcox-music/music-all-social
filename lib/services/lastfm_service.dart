@@ -61,6 +61,60 @@ class LastFmService {
     }
   }
 
+  /// NEW: Get best available artist image URL (Last.fm)
+  /// Returns the largest image available (typically "extralarge" or "mega").
+  Future<String?> getArtistImageUrl(String artist) async {
+    try {
+      final url = Uri.parse(
+        '$_baseUrl?method=artist.getinfo&api_key=$apiKey'
+        '&artist=${Uri.encodeComponent(artist)}&format=json',
+      );
+
+      final resp = await http.get(url).timeout(const Duration(seconds: 5));
+      if (resp.statusCode != 200) return null;
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final artistData = data['artist'] as Map<String, dynamic>?;
+      if (artistData == null) return null;
+
+      final images = artistData['image'];
+      if (images is! List) return null;
+
+      // Prefer biggest first
+      const preferred = ['mega', 'extralarge', 'large', 'medium', 'small'];
+
+      String? pickForSize(String size) {
+        for (final img in images) {
+          if (img is Map) {
+            final s = img['size']?.toString();
+            if (s == size) {
+              final url = img['#text']?.toString().trim() ?? '';
+              if (url.isNotEmpty) return url;
+            }
+          }
+        }
+        return null;
+      }
+
+      for (final size in preferred) {
+        final u = pickForSize(size);
+        if (u != null) return u;
+      }
+
+      // Fallback: any non-empty
+      for (final img in images) {
+        if (img is Map) {
+          final u = img['#text']?.toString().trim() ?? '';
+          if (u.isNotEmpty) return u;
+        }
+      }
+
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Batch fetch popularity for multiple albums (for sorting search results)
   Future<Map<String, int>> getAlbumListenerCounts(
     List<({String artist, String album, String id})> albums,
@@ -70,7 +124,8 @@ class LastFmService {
     // Fetch in parallel, max 5 at a time to avoid rate limits
     final batches = <List<({String artist, String album, String id})>>[];
     for (var i = 0; i < albums.length; i += 5) {
-      batches.add(albums.sublist(i, i + 5 > albums.length ? albums.length : i + 5));
+      batches.add(albums.sublist(
+          i, i + 5 > albums.length ? albums.length : i + 5));
     }
 
     for (final batch in batches) {
@@ -96,7 +151,8 @@ class LastFmService {
 
     final batches = <List<({String name, String id})>>[];
     for (var i = 0; i < artists.length; i += 5) {
-      batches.add(artists.sublist(i, i + 5 > artists.length ? artists.length : i + 5));
+      batches.add(artists.sublist(
+          i, i + 5 > artists.length ? artists.length : i + 5));
     }
 
     for (final batch in batches) {

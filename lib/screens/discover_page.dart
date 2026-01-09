@@ -2,12 +2,15 @@
 
 import 'dart:async';
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+
 import '../widgets/album_thumb.dart';
 import '../services/musicbrainz_service.dart';
 import '../services/lastfm_service.dart';
 import '../services/album_service.dart';
+import '../services/fanart_service.dart';
 import '../utils/error_handler.dart';
 import 'album_detail_page.dart';
 import 'artist_detail_page.dart';
@@ -39,6 +42,61 @@ class _DiscoverPageState extends State<DiscoverPage> {
   List<MbReleaseGroup> _albumResults = const [];
   List<MbArtistSearchResult> _artistResults = const [];
   Map<String, int> _listenerCounts = {};
+
+  // --------- NEW: memoized artist avatar URLs (Fanart -> Last.fm) ----------
+  final Map<String, Future<String?>> _artistAvatarFutureById = {};
+  final Map<String, String?> _artistAvatarUrlById = {};
+
+  Future<String?> _getArtistAvatarUrl(MbArtistSearchResult artist) {
+    final id = artist.id;
+
+    // resolved already
+    if (_artistAvatarUrlById.containsKey(id)) {
+      return Future.value(_artistAvatarUrlById[id]);
+    }
+
+    // in flight
+    final existing = _artistAvatarFutureById[id];
+    if (existing != null) return existing;
+
+    final fut = () async {
+      // 1) Fanart (best quality)
+      try {
+        final images = await FanartService.getArtistImages(id);
+        final url = (images?.artistThumb ?? images?.artistBackground)?.trim();
+        if (url != null && url.isNotEmpty) {
+          _artistAvatarUrlById[id] = url;
+          return url;
+        }
+      } catch (_) {
+        // ignore and fall back
+      }
+
+      // 2) Last.fm (better coverage)
+      try {
+        final url = (await _lastFmService.getArtistImageUrl(artist.name))?.trim();
+        if (url != null && url.isNotEmpty) {
+          _artistAvatarUrlById[id] = url;
+          return url;
+        }
+      } catch (_) {
+        // ignore and fall back
+      }
+
+      // 3) nothing
+      _artistAvatarUrlById[id] = null;
+      return null;
+    }();
+
+    _artistAvatarFutureById[id] = fut;
+    return fut;
+  }
+
+  void _clearArtistAvatarCacheForNewSearch() {
+    _artistAvatarFutureById.clear();
+    _artistAvatarUrlById.clear();
+  }
+  // ----------------------------------------------------------------------
 
   @override
   void initState() {
@@ -92,6 +150,8 @@ class _DiscoverPageState extends State<DiscoverPage> {
 
         _fetchAlbumPopularity(res);
       } else {
+        _clearArtistAvatarCacheForNewSearch();
+
         final res = await _mbService.searchArtists(query);
         if (!mounted) return;
         setState(() {
@@ -106,8 +166,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
 
       String message = 'Something went wrong. Please try again.';
       final text = e.toString();
-      if (text.contains('HandshakeException') ||
-          text.contains('SocketException')) {
+      if (text.contains('HandshakeException') || text.contains('SocketException')) {
         message = 'Check your internet connection and try again.';
       } else if (text.contains('TimeoutException')) {
         message = 'Request timed out. Please try again.';
@@ -450,13 +509,10 @@ class _DiscoverPageState extends State<DiscoverPage> {
             horizontal: 16,
             vertical: 8,
           ),
-          leading: CircleAvatar(
-            radius: 28,
-            backgroundColor: theme.colorScheme.primaryContainer,
-            child: Icon(
-              Icons.person,
-              color: theme.colorScheme.onPrimaryContainer,
-            ),
+          leading: _ArtistAvatar(
+            artist: artist,
+            theme: theme,
+            urlFuture: _getArtistAvatarUrl(artist),
           ),
           title: Text(
             artist.name,
@@ -539,6 +595,66 @@ class _DiscoverPageState extends State<DiscoverPage> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ArtistAvatar extends StatelessWidget {
+  const _ArtistAvatar({
+    required this.artist,
+    required this.theme,
+    required this.urlFuture,
+  });
+
+  final MbArtistSearchResult artist;
+  final ThemeData theme;
+  final Future<String?> urlFuture;
+
+  @override
+  Widget build(BuildContext context) {
+    final initial =
+        artist.name.trim().isNotEmpty ? artist.name.trim()[0].toUpperCase() : '?';
+
+    return FutureBuilder<String?>(
+      future: urlFuture,
+      builder: (context, snap) {
+        final url = (snap.data ?? '').trim();
+
+        if (url.isNotEmpty) {
+          return CircleAvatar(
+            radius: 28,
+            backgroundColor: theme.colorScheme.surfaceContainerHighest,
+            backgroundImage: CachedNetworkImageProvider(url),
+          );
+        }
+
+        if (snap.connectionState == ConnectionState.waiting) {
+          return CircleAvatar(
+            radius: 28,
+            backgroundColor: theme.colorScheme.surfaceContainerHighest,
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: theme.colorScheme.primary.withValues(alpha: 0.8),
+              ),
+            ),
+          );
+        }
+
+        return CircleAvatar(
+          radius: 28,
+          backgroundColor: theme.colorScheme.primaryContainer,
+          child: Text(
+            initial,
+            style: TextStyle(
+              color: theme.colorScheme.onPrimaryContainer,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        );
+      },
     );
   }
 }
