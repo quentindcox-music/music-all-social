@@ -2,6 +2,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import 'album_detail_page.dart';
+import 'artist_detail_page.dart';
+
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
 
@@ -37,7 +40,6 @@ class _ProfilePageState extends State<ProfilePage> {
         const SnackBar(content: Text('Profile updated')),
       );
 
-      // Auto-exit edit mode after save
       setState(() => _editMode = false);
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -62,9 +64,15 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
-  void _openLatestReviews(String uid) {
+  void _openFavoriteAlbums(String uid) {
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => LatestReviewsPage(uid: uid)),
+      MaterialPageRoute(builder: (_) => FavoriteAlbumsPage(uid: uid)),
+    );
+  }
+
+  void _openFavoriteArtists(String uid) {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => FavoriteArtistsPage(uid: uid)),
     );
   }
 
@@ -121,83 +129,74 @@ class _ProfilePageState extends State<ProfilePage> {
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              // ---------- Header ----------
-              Card(
-                elevation: 0,
-                color: theme.colorScheme.surfaceContainerHighest,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                          _ProfileAvatar(
-                            photoUrl: photoUrl,
-                            displayName: displayName,
-                            radius: 34,
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  displayName,
-                                  style: theme.textTheme.titleLarge?.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  'MusicAll member',
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                    color: theme.colorScheme.outline,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 14),
-
-                      // Followers / Following counts
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _CountChip(
-                              label: 'Followers',
-                              stream: followersRef.snapshots(),
-                              onTap: () => _openFollowers(uid),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: _CountChip(
-                              label: 'Following',
-                              stream: followingRef.snapshots(),
-                              onTap: () => _openFollowing(uid),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
+              // ---------- Header (no grey card) ----------
+              Row(
+                children: [
+                  _ProfileAvatar(
+                    photoUrl: photoUrl,
+                    displayName: displayName,
+                    radius: 34,
                   ),
-                ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          displayName,
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'MusicAll member',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.outline,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+
+              // Followers / Following counts
+              Row(
+                children: [
+                  Expanded(
+                    child: _CountChip(
+                      label: 'Followers',
+                      stream: followersRef.snapshots(),
+                      onTap: () => _openFollowers(uid),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _CountChip(
+                      label: 'Following',
+                      stream: followingRef.snapshots(),
+                      onTap: () => _openFollowing(uid),
+                    ),
+                  ),
+                ],
               ),
 
+              const SizedBox(height: 14),
+              Divider(
+                height: 1,
+                color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+              ),
               const SizedBox(height: 16),
 
               // ---------- Navigation sections ----------
               Text(
                 'Your activity',
                 style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
+                  fontWeight: FontWeight.w800,
                 ),
               ),
               const SizedBox(height: 10),
@@ -217,10 +216,17 @@ class _ProfilePageState extends State<ProfilePage> {
                     ),
                     const Divider(height: 1),
                     _NavRow(
-                      icon: Icons.rate_review,
-                      title: 'Latest reviews',
-                      subtitle: 'See what you’ve rated recently',
-                      onTap: () => _openLatestReviews(uid),
+                      icon: Icons.favorite,
+                      title: 'Favorited albums',
+                      subtitle: 'Saved for later',
+                      onTap: () => _openFavoriteAlbums(uid),
+                    ),
+                    const Divider(height: 1),
+                    _NavRow(
+                      icon: Icons.favorite_border,
+                      title: 'Favorited artists',
+                      subtitle: 'Saved for later',
+                      onTap: () => _openFavoriteArtists(uid),
                     ),
                   ],
                 ),
@@ -233,7 +239,7 @@ class _ProfilePageState extends State<ProfilePage> {
                 Text(
                   'Edit profile',
                   style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -270,7 +276,7 @@ class _ProfilePageState extends State<ProfilePage> {
               Text(
                 'Account',
                 style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
+                  fontWeight: FontWeight.w800,
                 ),
               ),
               const SizedBox(height: 8),
@@ -325,9 +331,8 @@ class _ProfileAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final initial = displayName.trim().isNotEmpty
-        ? displayName.trim()[0].toUpperCase()
-        : '?';
+    final initial =
+        displayName.trim().isNotEmpty ? displayName.trim()[0].toUpperCase() : '?';
 
     return CircleAvatar(
       radius: radius,
@@ -338,7 +343,7 @@ class _ProfileAvatar extends StatelessWidget {
               initial,
               style: TextStyle(
                 color: theme.colorScheme.onPrimaryContainer,
-                fontWeight: FontWeight.w800,
+                fontWeight: FontWeight.w900,
                 fontSize: radius * 0.9,
               ),
             )
@@ -377,6 +382,27 @@ class _CountChip extends StatelessWidget {
         child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
           stream: stream,
           builder: (context, snap) {
+            if (snap.hasError) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '—',
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    label,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.outline,
+                    ),
+                  ),
+                ],
+              );
+            }
+
             final count = snap.data?.size ?? 0;
 
             return Column(
@@ -431,10 +457,7 @@ class _NavRow extends StatelessWidget {
         ),
         child: Icon(icon, color: theme.colorScheme.onPrimaryContainer),
       ),
-      title: Text(
-        title,
-        style: const TextStyle(fontWeight: FontWeight.w600),
-      ),
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
       subtitle: Text(
         subtitle,
         maxLines: 1,
@@ -478,10 +501,279 @@ class FollowingListPage extends StatelessWidget {
   }
 }
 
+// ----------------- REAL: Favorites -----------------
+// users/{uid}/favorites_albums/{albumId}
+// users/{uid}/favorites_artists/{artistId}
+
+class FavoriteAlbumsPage extends StatelessWidget {
+  const FavoriteAlbumsPage({super.key, required this.uid});
+  final String uid;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    final query = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('favorites_albums')
+        .orderBy('createdAt', descending: true)
+        .limit(200);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Favorited albums')),
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: query.snapshots(),
+        builder: (context, snap) {
+          if (snap.hasError) return Center(child: Text('Error: ${snap.error}'));
+          if (!snap.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final docs = snap.data!.docs;
+          if (docs.isEmpty) {
+            return Center(
+              child: Text(
+                'No favorited albums yet.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.outline,
+                ),
+              ),
+            );
+          }
+
+          return ListView.separated(
+            itemCount: docs.length,
+            separatorBuilder: (_, _) => const Divider(height: 1),
+            itemBuilder: (context, i) {
+              final d = docs[i];
+              final data = d.data();
+
+              final albumId = (data['albumId'] as String?)?.trim().isNotEmpty == true
+                  ? (data['albumId'] as String).trim()
+                  : d.id;
+
+              final title = (data['title'] as String?)?.trim();
+              final artist = (data['primaryArtistName'] as String?)?.trim();
+              final coverUrl = (data['coverUrl'] as String?)?.trim() ?? '';
+
+              return Dismissible(
+                key: ValueKey(d.id),
+                direction: DismissDirection.endToStart,
+                background: Container(
+                  alignment: Alignment.centerRight,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  color: theme.colorScheme.errorContainer,
+                  child: Icon(Icons.delete, color: theme.colorScheme.onErrorContainer),
+                ),
+                confirmDismiss: (_) async {
+                  return await showDialog<bool>(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: const Text('Remove favorite?'),
+                          content: const Text('This album will be removed from your favorites.'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx, false),
+                              child: const Text('Cancel'),
+                            ),
+                            FilledButton(
+                              onPressed: () => Navigator.pop(ctx, true),
+                              child: const Text('Remove'),
+                            ),
+                          ],
+                        ),
+                      ) ??
+                      false;
+                },
+                onDismissed: (_) async {
+                  await d.reference.delete();
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Removed from favorites')),
+                    );
+                  }
+                },
+                child: ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  leading: ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      width: 52,
+                      height: 52,
+                      color: theme.colorScheme.surfaceContainerHighest,
+                      child: coverUrl.isNotEmpty
+                          ? Image.network(
+                              coverUrl,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => const Icon(Icons.album),
+                            )
+                          : const Icon(Icons.album),
+                    ),
+                  ),
+                  title: Text(
+                    title?.isNotEmpty == true ? title! : 'Album',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: artist?.isNotEmpty == true
+                      ? Text(artist!, maxLines: 1, overflow: TextOverflow.ellipsis)
+                      : null,
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => AlbumDetailPage(albumId: albumId)),
+                    );
+                  },
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+class FavoriteArtistsPage extends StatelessWidget {
+  const FavoriteArtistsPage({super.key, required this.uid});
+  final String uid;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    final query = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('favorites_artists')
+        .orderBy('createdAt', descending: true)
+        .limit(200);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Favorited artists')),
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: query.snapshots(),
+        builder: (context, snap) {
+          if (snap.hasError) return Center(child: Text('Error: ${snap.error}'));
+          if (!snap.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final docs = snap.data!.docs;
+          if (docs.isEmpty) {
+            return Center(
+              child: Text(
+                'No favorited artists yet.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.outline,
+                ),
+              ),
+            );
+          }
+
+          return ListView.separated(
+            itemCount: docs.length,
+            separatorBuilder: (_, _) => const Divider(height: 1),
+            itemBuilder: (context, i) {
+              final d = docs[i];
+              final data = d.data();
+
+              final artistId =
+                  (data['artistId'] as String?)?.trim().isNotEmpty == true
+                      ? (data['artistId'] as String).trim()
+                      : d.id;
+
+              final name = (data['name'] as String?)?.trim();
+              final thumbUrl = (data['thumbUrl'] as String?)?.trim() ?? '';
+
+              final initial = (name?.trim().isNotEmpty == true)
+                  ? name!.trim()[0].toUpperCase()
+                  : '?';
+
+              return Dismissible(
+                key: ValueKey(d.id),
+                direction: DismissDirection.endToStart,
+                background: Container(
+                  alignment: Alignment.centerRight,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  color: theme.colorScheme.errorContainer,
+                  child: Icon(Icons.delete, color: theme.colorScheme.onErrorContainer),
+                ),
+                confirmDismiss: (_) async {
+                  return await showDialog<bool>(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: const Text('Remove favorite?'),
+                          content: const Text('This artist will be removed from your favorites.'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx, false),
+                              child: const Text('Cancel'),
+                            ),
+                            FilledButton(
+                              onPressed: () => Navigator.pop(ctx, true),
+                              child: const Text('Remove'),
+                            ),
+                          ],
+                        ),
+                      ) ??
+                      false;
+                },
+                onDismissed: (_) async {
+                  await d.reference.delete();
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Removed from favorites')),
+                    );
+                  }
+                },
+                child: ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  leading: CircleAvatar(
+                    radius: 26,
+                    backgroundColor: theme.colorScheme.primaryContainer,
+                    backgroundImage: thumbUrl.isNotEmpty ? NetworkImage(thumbUrl) : null,
+                    child: thumbUrl.isEmpty
+                        ? Text(
+                            initial,
+                            style: TextStyle(
+                              color: theme.colorScheme.onPrimaryContainer,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          )
+                        : null,
+                  ),
+                  title: Text(
+                    name?.isNotEmpty == true ? name! : 'Artist',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => ArtistDetailPage(
+                          artistId: artistId,
+                          artistName: name ?? '',
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
 // ----------------- REAL: Lists -----------------
-// Firestore:
 // lists/{listId} fields: ownerUid, title, description, itemCount, createdAt, updatedAt
-// lists/{listId}/items/{albumId} optional later
 
 class MyListsPage extends StatelessWidget {
   const MyListsPage({super.key, required this.uid});
@@ -554,12 +846,8 @@ class MyListsPage extends StatelessWidget {
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: query.snapshots(),
         builder: (context, snap) {
-          if (snap.hasError) {
-            return Center(child: Text('Error: ${snap.error}'));
-          }
-          if (!snap.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
+          if (snap.hasError) return Center(child: Text('Error: ${snap.error}'));
+          if (!snap.hasData) return const Center(child: CircularProgressIndicator());
 
           final docs = snap.data!.docs;
           if (docs.isEmpty) {
@@ -578,7 +866,7 @@ class MyListsPage extends StatelessWidget {
                     Text(
                       'No lists yet',
                       style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w800,
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -623,7 +911,7 @@ class MyListsPage extends StatelessWidget {
                 ),
                 title: Text(
                   title?.isNotEmpty == true ? title! : 'Untitled list',
-                  style: const TextStyle(fontWeight: FontWeight.w600),
+                  style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
                 subtitle: Text(
                   '$count items',
@@ -635,177 +923,6 @@ class MyListsPage extends StatelessWidget {
                 onTap: () {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('List detail page coming next')),
-                  );
-                },
-              );
-            },
-          );
-        },
-      ),
-    );
-  }
-}
-
-// ----------------- REAL: Latest Reviews -----------------
-// Uses your existing structure: albums/{albumId}/reviews/{uid}
-
-class LatestReviewsPage extends StatefulWidget {
-  const LatestReviewsPage({super.key, required this.uid});
-  final String uid;
-
-  @override
-  State<LatestReviewsPage> createState() => _LatestReviewsPageState();
-}
-
-class _LatestReviewsPageState extends State<LatestReviewsPage> {
-  final Map<String, Future<DocumentSnapshot<Map<String, dynamic>>>> _albumCache = {};
-
-  Future<DocumentSnapshot<Map<String, dynamic>>> _albumDoc(String albumId) {
-    return _albumCache.putIfAbsent(
-      albumId,
-      () => FirebaseFirestore.instance.collection('albums').doc(albumId).get(),
-    );
-  }
-
-  String _formatDate(Timestamp? ts) {
-    if (ts == null) return '';
-    final dt = ts.toDate();
-    final now = DateTime.now();
-    final diff = now.difference(dt);
-
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m';
-    if (diff.inHours < 24) return '${diff.inHours}h';
-    if (diff.inDays < 7) return '${diff.inDays}d';
-    return '${dt.month}/${dt.day}/${dt.year}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    final query = FirebaseFirestore.instance
-        .collectionGroup('reviews')
-        .where(FieldPath.documentId, isEqualTo: widget.uid)
-        .orderBy('updatedAt', descending: true)
-        .limit(50);
-
-    return Scaffold(
-      appBar: AppBar(title: const Text('Latest reviews')),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: query.snapshots(),
-        builder: (context, snap) {
-          if (snap.hasError) {
-            return Center(child: Text('Error: ${snap.error}'));
-          }
-          if (!snap.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
-
-          final docs = snap.data!.docs;
-          if (docs.isEmpty) {
-            return Center(
-              child: Text(
-                'No reviews yet.',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.outline,
-                ),
-              ),
-            );
-          }
-
-          return ListView.separated(
-            itemCount: docs.length,
-            separatorBuilder: (_, _) => const Divider(height: 1),
-            itemBuilder: (context, i) {
-              final reviewDoc = docs[i];
-              final data = reviewDoc.data();
-
-              // albums/{albumId}/reviews/{uid}
-              final albumId = reviewDoc.reference.parent.parent?.id ?? '';
-
-              final ratingNum = data['rating'];
-              final rating = ratingNum is num ? ratingNum.toDouble() : 0.0;
-              final text = (data['text'] as String? ?? '').trim();
-              final updatedAt = data['updatedAt'] as Timestamp?;
-              final timeLabel = _formatDate(updatedAt);
-
-              return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                future: _albumDoc(albumId),
-                builder: (context, albumSnap) {
-                  final album = albumSnap.data?.data();
-                  final title = (album?['title'] as String?)?.trim();
-                  final artist = (album?['primaryArtistName'] as String?)?.trim();
-                  final coverUrl = (album?['coverUrl'] as String?)?.trim() ?? '';
-
-                  return ListTile(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    leading: ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: Container(
-                        width: 52,
-                        height: 52,
-                        color: theme.colorScheme.surfaceContainerHighest,
-                        child: coverUrl.isNotEmpty
-                            ? Image.network(
-                                coverUrl,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, _, _) => const Icon(Icons.album),
-                              )
-                            : const Icon(Icons.album),
-                      ),
-                    ),
-                    title: Text(
-                      title?.isNotEmpty == true ? title! : 'Album',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (artist?.isNotEmpty == true)
-                          Text(
-                            artist!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            Text(
-                              '${rating.toStringAsFixed(1)}/10',
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                fontWeight: FontWeight.w700,
-                                color: theme.colorScheme.primary,
-                              ),
-                            ),
-                            if (timeLabel.isNotEmpty) ...[
-                              Text(
-                                ' • ',
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: theme.colorScheme.outline,
-                                ),
-                              ),
-                              Text(
-                                timeLabel,
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: theme.colorScheme.outline,
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                        if (text.isNotEmpty) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            text,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodySmall,
-                          ),
-                        ],
-                      ],
-                    ),
                   );
                 },
               );

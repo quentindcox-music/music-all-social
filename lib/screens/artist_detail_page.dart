@@ -8,6 +8,8 @@ import 'package:music_all_app/services/musicbrainz_service.dart';
 import 'package:music_all_app/services/fanart_service.dart';
 import 'package:music_all_app/services/deezer_service.dart';
 import 'album_detail_page.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
 
 /// ------------------------------
 /// Firestore Discography Cache
@@ -306,29 +308,37 @@ Future<void> _refreshDiscographyIfNeeded() async {
               : CustomScrollView(
                   slivers: [
                     SliverAppBar(
-                      expandedHeight: 280,
-                      pinned: true,
-                      stretch: true,
-                      backgroundColor: theme.colorScheme.surface,
-                      flexibleSpace: FlexibleSpaceBar(
-                        title: Text(
-                          widget.artistName,
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 20,
-                            shadows: [
-                              Shadow(
-                                color: Colors.black.withValues(alpha: 0.7),
-                                blurRadius: 8,
-                              ),
-                            ],
-                          ),
-                        ),
-                        titlePadding: const EdgeInsets.only(left: 16, bottom: 16),
-                        background: _buildHeroImage(theme),
-                      ),
-                    ),
+  expandedHeight: 280,
+  pinned: true,
+  stretch: true,
+  backgroundColor: theme.colorScheme.surface,
+  actions: [
+    FavoriteArtistButton(
+      artistId: widget.artistId,
+      artistName: widget.artistName,
+      imageUrl: _artistImages?.artistThumb ?? _artistImages?.artistBackground,
+    ),
+  ],
+  flexibleSpace: FlexibleSpaceBar(
+    title: Text(
+      widget.artistName,
+      style: TextStyle(
+        color: Colors.white,
+        fontWeight: FontWeight.bold,
+        fontSize: 20,
+        shadows: [
+          Shadow(
+            color: Colors.black.withValues(alpha: 0.7),
+            blurRadius: 8,
+          ),
+        ],
+      ),
+    ),
+    titlePadding: const EdgeInsets.only(left: 16, bottom: 16),
+    background: _buildHeroImage(theme),
+  ),
+),
+
 
                     // Optional sync indicator
                     if (_syncing)
@@ -718,6 +728,67 @@ class _InfoChip extends StatelessWidget {
     );
   }
 }
+
+class FavoriteArtistButton extends StatelessWidget {
+  const FavoriteArtistButton({
+    super.key,
+    required this.artistId,
+    required this.artistName,
+    this.imageUrl,
+  });
+
+  final String artistId;
+  final String artistName;
+  final String? imageUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (uid.isEmpty) {
+      return IconButton(
+        onPressed: null,
+        tooltip: 'Sign in to favorite',
+        icon: const Icon(Icons.favorite_border, color: Colors.white),
+      );
+    }
+
+    final favRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('favorites_artists')
+        .doc(artistId);
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: favRef.snapshots(),
+      builder: (context, snap) {
+        final isFav = snap.data?.exists == true;
+
+        return IconButton(
+          tooltip: isFav ? 'Unfavorite' : 'Favorite',
+          icon: Icon(
+            isFav ? Icons.favorite : Icons.favorite_border,
+            color: Colors.white,
+          ),
+          onPressed: () async {
+            if (isFav) {
+              await favRef.delete();
+              return;
+            }
+
+            await favRef.set({
+              'artistId': artistId,
+              'name': artistName,
+              'imageUrl': (imageUrl ?? '').trim(),
+              'createdAt': FieldValue.serverTimestamp(),
+              'updatedAt': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true));
+          },
+        );
+      },
+    );
+  }
+}
+
 
 class ArtistDiscographyPage extends StatelessWidget {
   const ArtistDiscographyPage({

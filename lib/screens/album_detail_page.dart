@@ -56,15 +56,16 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   String? _trackSyncError;
   bool _trackSyncTriggered = false;
 
+  // Prevent repeated recently-viewed writes
+  bool _markedViewed = false;
+
   Future<bool> _shouldSyncTracks(
     DocumentReference<Map<String, dynamic>> albumRef, {
     Duration ttl = const Duration(days: 7),
   }) async {
-    // If no tracks exist, sync.
     final existing = await albumRef.collection('tracks').limit(1).get();
     if (existing.docs.isEmpty) return true;
 
-    // TTL-based sync
     final albumSnap = await albumRef.get();
     final ts = albumSnap.data()?['lastTracksSyncAt'] as Timestamp?;
     if (ts == null) return true;
@@ -91,20 +92,17 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         });
       }
 
-      // widget.albumId is a release-group id
       final result = await MusicBrainzService.fetchTracklistForReleaseGroup(
         widget.albumId,
         userAgent: 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
       );
 
-      // Save chosen release + last sync timestamp on album doc
       await albumRef.set({
         'primaryReleaseId': result.releaseId,
         'lastTracksSyncAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      // Optional: clean old tracks (prevents stale duplicates when release changes)
-      // Comment out if you prefer "merge only".
+      // Clean old tracks (optional)
       final old = await albumRef.collection('tracks').get();
       if (old.docs.isNotEmpty) {
         WriteBatch delBatch = FirebaseFirestore.instance.batch();
@@ -121,7 +119,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         if (delCount > 0) await delBatch.commit();
       }
 
-      // Write tracks into albums/{albumId}/tracks
       WriteBatch batch = FirebaseFirestore.instance.batch();
       int count = 0;
 
@@ -137,8 +134,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       for (final t in result.tracks) {
         final disc = (t['disc'] as int?) ?? 1;
         final pos = (t['position'] as int?) ?? 0;
-
-        // Stable per disc/position
         final trackId = 'd$disc-p$pos';
 
         final ref = albumRef.collection('tracks').doc(trackId);
@@ -151,8 +146,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                 : 'Untitled track',
             'disc': disc,
             'position': pos,
-            if (t['durationSeconds'] != null)
-              'durationSeconds': t['durationSeconds'],
+            if (t['durationSeconds'] != null) 'durationSeconds': t['durationSeconds'],
             if (t['recordingId'] != null) 'recordingId': t['recordingId'],
             'updatedAt': FieldValue.serverTimestamp(),
             'source': 'musicbrainz',
@@ -166,12 +160,51 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
       await commit(forceCommit: true);
     } catch (e) {
-      if (mounted) {
-        setState(() => _trackSyncError = e.toString());
-      }
+      if (mounted) setState(() => _trackSyncError = e.toString());
     } finally {
+      if (mounted) setState(() => _syncingTracks = false);
+    }
+  }
+
+  Future<void> _toggleFavoriteAlbum({
+    required String uid,
+    required String albumId,
+    required String title,
+    required String primaryArtistName,
+    required String primaryArtistId,
+    required String coverUrl,
+  }) async {
+    if (uid.isEmpty) return;
+
+    final favRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('favorites_albums')
+        .doc(albumId);
+
+    final snap = await favRef.get();
+    if (snap.exists) {
+      await favRef.delete();
       if (mounted) {
-        setState(() => _syncingTracks = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Removed from favorites')),
+        );
+      }
+    } else {
+      await favRef.set({
+        'albumId': albumId,
+        'title': title,
+        'primaryArtistName': primaryArtistName,
+        if (primaryArtistId.trim().isNotEmpty) 'primaryArtistId': primaryArtistId.trim(),
+        'coverUrl': coverUrl,
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Added to favorites')),
+        );
       }
     }
   }
@@ -183,65 +216,106 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     final theme = Theme.of(context);
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('Album')),
-      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        stream: albumRef.snapshots(),
-        builder: (context, albumSnap) {
-          if (albumSnap.hasError) {
-            return Center(
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: albumRef.snapshots(),
+      builder: (context, albumSnap) {
+        if (albumSnap.hasError) {
+          return Scaffold(
+            appBar: AppBar(title: const Text('Album')),
+            body: Center(
               child: Text('Something went wrong: ${albumSnap.error}'),
-            );
-          }
+            ),
+          );
+        }
 
-          if (!albumSnap.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
+        if (!albumSnap.hasData) {
+          return Scaffold(
+            appBar: AppBar(title: Text('Album')),
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
 
-          final album = albumSnap.data?.data();
-          if (album == null) {
-            return Center(child: Text('Album "${widget.albumId}" not found.'));
-          }
+        final album = albumSnap.data?.data();
+        if (album == null) {
+          return Scaffold(
+            appBar: AppBar(title: const Text('Album')),
+            body: Center(child: Text('Album "${widget.albumId}" not found.')),
+          );
+        }
 
-          final title = (album['title'] ?? '') as String;
-          final artist = (album['primaryArtistName'] ?? '') as String;
+        final title = (album['title'] ?? '') as String;
+        final artist = (album['primaryArtistName'] ?? '') as String;
 
-          // Support both legacy and new field names.
-          final primaryArtistId = (album['primaryArtistId'] as String?) ??
-              (album['primaryArtistID'] as String?) ??
-              '';
+        // Support both legacy and new field names.
+        final primaryArtistId = (album['primaryArtistId'] as String?) ??
+            (album['primaryArtistID'] as String?) ??
+            '';
 
-          final firstReleaseDate = (album['firstReleaseDate'] ?? '') as String?;
-          final primaryType = (album['primaryType'] ?? '') as String?;
-          final coverUrl = (album['coverUrl'] as String?)?.trim() ?? '';
+        final firstReleaseDate = (album['firstReleaseDate'] ?? '') as String?;
+        final primaryType = (album['primaryType'] ?? '') as String?;
+        final coverUrl = (album['coverUrl'] as String?)?.trim() ?? '';
 
-          if (uid.isNotEmpty) {
-            RecentlyViewedService.markAlbumViewed(
-              uid: uid,
-              albumId: widget.albumId,
-              title: title,
-              primaryArtistName: artist,
-              primaryArtistId: primaryArtistId,
-              coverUrl: coverUrl,
-            );
-          }
+        // Mark viewed once per open (prevents repeated writes on rebuilds)
+        if (uid.isNotEmpty && !_markedViewed) {
+          _markedViewed = true;
+          // ignore: discarded_futures
+          RecentlyViewedService.markAlbumViewed(
+            uid: uid,
+            albumId: widget.albumId,
+            title: title,
+            primaryArtistName: artist,
+            primaryArtistId: primaryArtistId,
+            coverUrl: coverUrl,
+          );
+        }
 
-          _generatePalette(coverUrl, theme);
+        _generatePalette(coverUrl, theme);
 
-          // Trigger background track sync once per page open.
-          if (!_trackSyncTriggered) {
-            _trackSyncTriggered = true;
-            // ignore: discarded_futures
-            _syncTracklist(albumRef);
-          }
+        if (!_trackSyncTriggered) {
+          _trackSyncTriggered = true;
+          // ignore: discarded_futures
+          _syncTracklist(albumRef);
+        }
 
-          final releaseLabel = formatReleaseDate(firstReleaseDate);
-          final baseColor = _dominantColor ?? theme.colorScheme.surface;
+        final releaseLabel = formatReleaseDate(firstReleaseDate);
+        final baseColor = _dominantColor ?? theme.colorScheme.surface;
+        final darkenedColor = Color.lerp(baseColor, Colors.black, 0.4)!;
+        final bottomColor = theme.colorScheme.surface;
 
-          final darkenedColor = Color.lerp(baseColor, Colors.black, 0.4)!;
-          final bottomColor = theme.colorScheme.surface;
+        final favRef = uid.isEmpty
+            ? null
+            : FirebaseFirestore.instance
+                .collection('users')
+                .doc(uid)
+                .collection('favorites_albums')
+                .doc(widget.albumId);
 
-          return ListView(
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Album'),
+            actions: [
+              if (favRef != null)
+                StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                  stream: favRef.snapshots(),
+                  builder: (context, favSnap) {
+                    final isFav = favSnap.data?.exists == true;
+                    return IconButton(
+                      tooltip: isFav ? 'Unfavorite' : 'Favorite',
+                      icon: Icon(isFav ? Icons.favorite : Icons.favorite_border),
+                      onPressed: () => _toggleFavoriteAlbum(
+                        uid: uid,
+                        albumId: widget.albumId,
+                        title: title,
+                        primaryArtistName: artist,
+                        primaryArtistId: primaryArtistId,
+                        coverUrl: coverUrl,
+                      ),
+                    );
+                  },
+                ),
+            ],
+          ),
+          body: ListView(
             padding: EdgeInsets.zero,
             children: [
               // Hero area
@@ -322,7 +396,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                           textAlign: TextAlign.center,
                           style: theme.textTheme.titleLarge?.copyWith(
                             fontWeight: FontWeight.w800,
-                            color:  const Color.fromARGB(255, 146, 106, 255).withValues(alpha: 0.95),
+                            color: const Color.fromARGB(255, 146, 106, 255)
+                                .withValues(alpha: 0.95),
                             letterSpacing: 0.3,
                           ),
                         ),
@@ -333,7 +408,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                         textAlign: TextAlign.center,
                         style: theme.textTheme.titleLarge?.copyWith(
                           fontWeight: FontWeight.w800,
-                          color: const Color.fromARGB(255, 146, 106, 255).withValues(alpha: 0.95),
+                          color: const Color.fromARGB(255, 146, 106, 255)
+                              .withValues(alpha: 0.95),
                         ),
                       ),
                     const SizedBox(height: 14),
@@ -362,8 +438,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
               // Tracklist Header + Controls
               Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 child: Row(
                   children: [
                     Expanded(
@@ -393,8 +468,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
               if (_trackSyncError != null)
                 Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                   child: Text(
                     'Track sync error: $_trackSyncError',
                     style: theme.textTheme.bodySmall?.copyWith(
@@ -403,7 +477,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   ),
                 ),
 
-              // Tracklist Stream (Firestore-first)
               StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: albumRef
                     .collection('tracks')
@@ -414,8 +487,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   if (snap.hasError) {
                     debugPrint('Tracklist error: ${snap.error}');
                     return Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: Text(
                         'Could not load tracklist.',
                         style: theme.textTheme.bodyMedium?.copyWith(
@@ -437,15 +509,12 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   final docs = snap.data?.docs ?? [];
                   if (docs.isEmpty) {
                     return Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            _syncingTracks
-                                ? 'Fetching tracklist…'
-                                : 'No tracklist available yet.',
+                            _syncingTracks ? 'Fetching tracklist…' : 'No tracklist available yet.',
                             style: theme.textTheme.bodyMedium?.copyWith(
                               color: theme.colorScheme.outline,
                             ),
@@ -470,14 +539,12 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   return Column(
                     children: docs.map((d) {
                       final data = d.data();
-                      final trackNum =
-                          (data['position'] as num?)?.toInt() ?? 0;
+                      final trackNum = (data['position'] as num?)?.toInt() ?? 0;
                       final disc = (data['disc'] as num?)?.toInt() ?? 1;
 
-                      final tTitle =
-                          (data['title'] as String?)?.trim().isNotEmpty == true
-                              ? (data['title'] as String).trim()
-                              : 'Untitled track';
+                      final tTitle = (data['title'] as String?)?.trim().isNotEmpty == true
+                          ? (data['title'] as String).trim()
+                          : 'Untitled track';
 
                       final durNum = data['durationSeconds'] as num?;
                       String durationLabel = '';
@@ -485,16 +552,13 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                         final totalSeconds = durNum.round();
                         final minutes = totalSeconds ~/ 60;
                         final seconds = totalSeconds % 60;
-                        durationLabel =
-                            '$minutes:${seconds.toString().padLeft(2, '0')}';
+                        durationLabel = '$minutes:${seconds.toString().padLeft(2, '0')}';
                       }
 
-                      final discPrefix =
-                          hasMultipleDiscs ? 'Disc $disc - ' : '';
+                      final discPrefix = hasMultipleDiscs ? 'Disc $disc - ' : '';
 
                       return Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 10),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
@@ -515,8 +579,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                                 children: [
                                   Text(
                                     tTitle,
-                                    style: theme.textTheme.titleMedium
-                                        ?.copyWith(fontSize: 16),
+                                    style: theme.textTheme.titleMedium?.copyWith(fontSize: 16),
                                     overflow: TextOverflow.ellipsis,
                                   ),
                                   if (discPrefix.isNotEmpty)
@@ -547,7 +610,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
               const SizedBox(height: 24),
 
-              // Reviews
               _YourReviewSection(
                 albumRef: albumRef,
                 uid: uid,
@@ -560,9 +622,9 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
               ),
               const SizedBox(height: 24),
             ],
-          );
-        },
-      ),
+          ),
+        );
+      },
     );
   }
 }
@@ -656,8 +718,7 @@ class _YourReviewSection extends StatelessWidget {
         final review = reviewSnap.data?.data();
         final hasReview = review != null;
 
-        final rating =
-            hasReview ? (review['rating'] as num? ?? 0).toDouble() : 0.0;
+        final rating = hasReview ? (review['rating'] as num? ?? 0).toDouble() : 0.0;
         final text = hasReview ? (review['text'] as String? ?? '') : '';
 
         return Padding(
@@ -670,8 +731,7 @@ class _YourReviewSection extends StatelessWidget {
                 children: [
                   Text(
                     'Your review',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w600),
+                    style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
                   if (hasReview) ...[
@@ -690,8 +750,7 @@ class _YourReviewSection extends StatelessWidget {
                     const SizedBox(height: 6),
                     if (text.trim().isNotEmpty) Text(text),
                     if (text.trim().isEmpty)
-                      Text('(No written review)',
-                          style: theme.textTheme.bodySmall),
+                      Text('(No written review)', style: theme.textTheme.bodySmall),
                   ] else
                     Text('You have not rated this album yet.',
                         style: theme.textTheme.bodyMedium),
@@ -711,9 +770,7 @@ class _YourReviewSection extends StatelessWidget {
                           );
                         },
                         icon: const Icon(Icons.rate_review),
-                        label: Text(hasReview
-                            ? 'Edit rating / review'
-                            : 'Rate this album'),
+                        label: Text(hasReview ? 'Edit rating / review' : 'Rate this album'),
                       ),
                       const SizedBox(width: 12),
                       if (hasReview)
@@ -741,8 +798,7 @@ class _YourReviewSection extends StatelessWidget {
                               await myReviewRef.delete();
                               if (context.mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                      content: Text('Review deleted')),
+                                  const SnackBar(content: Text('Review deleted')),
                                 );
                               }
                             }
@@ -782,8 +838,7 @@ class _CommunityReviewsSection extends StatelessWidget {
           .snapshots(),
       builder: (context, listSnap) {
         if (listSnap.hasError) {
-          return Center(
-              child: Text('Could not load reviews: ${listSnap.error}'));
+          return Center(child: Text('Could not load reviews: ${listSnap.error}'));
         }
 
         if (!listSnap.hasData) {
@@ -817,11 +872,8 @@ class _CommunityReviewsSection extends StatelessWidget {
                     children: [
                       Text('Community reviews: $count'),
                       Text(
-                        avg == null
-                            ? 'Avg: -'
-                            : 'Avg: ${avg.toStringAsFixed(1)}/10',
-                        style: theme.textTheme.bodyMedium
-                            ?.copyWith(fontWeight: FontWeight.w600),
+                        avg == null ? 'Avg: -' : 'Avg: ${avg.toStringAsFixed(1)}/10',
+                        style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
                       ),
                     ],
                   ),
@@ -830,8 +882,7 @@ class _CommunityReviewsSection extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 'Recent reviews',
-                style: theme.textTheme.titleLarge
-                    ?.copyWith(fontWeight: FontWeight.w600),
+                style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 10),
               if (docs.isEmpty)
@@ -841,8 +892,7 @@ class _CommunityReviewsSection extends StatelessWidget {
                   children: docs.take(20).map((d) {
                     final data = d.data();
                     final ratingNum = data['rating'];
-                    final rating =
-                        ratingNum is num ? ratingNum.toDouble() : 0.0;
+                    final rating = ratingNum is num ? ratingNum.toDouble() : 0.0;
                     final text = (data['text'] as String? ?? '').trim();
                     final who = d.id;
 
@@ -856,17 +906,13 @@ class _CommunityReviewsSection extends StatelessWidget {
                             const SizedBox(width: 8),
                             Text(
                               '${rating.toStringAsFixed(1)}/10',
-                              style: theme.textTheme.bodyMedium
-                                  ?.copyWith(fontWeight: FontWeight.w600),
+                              style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
                             ),
                           ],
                         ),
                         subtitle: text.isEmpty
-                            ? Text('(No written review)',
-                                style: theme.textTheme.bodySmall)
-                            : Text(text,
-                                maxLines: 3,
-                                overflow: TextOverflow.ellipsis),
+                            ? Text('(No written review)', style: theme.textTheme.bodySmall)
+                            : Text(text, maxLines: 3, overflow: TextOverflow.ellipsis),
                         trailing: who == uid
                             ? Text(
                                 'You',
@@ -909,12 +955,10 @@ class RatingStars extends StatelessWidget {
       icons.add(Icon(Icons.star, size: size, color: theme.colorScheme.primary));
     }
     if (hasHalf) {
-      icons.add(
-          Icon(Icons.star_half, size: size, color: theme.colorScheme.primary));
+      icons.add(Icon(Icons.star_half, size: size, color: theme.colorScheme.primary));
     }
     while (icons.length < 5) {
-      icons.add(Icon(Icons.star_border,
-          size: size, color: theme.colorScheme.primary));
+      icons.add(Icon(Icons.star_border, size: size, color: theme.colorScheme.primary));
     }
 
     return Row(mainAxisSize: MainAxisSize.min, children: icons);
@@ -953,20 +997,7 @@ String? formatReleaseDate(String? iso) {
 
   try {
     final dt = DateTime.parse(trimmed);
-    const monthNames = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec'
-    ];
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     final m = monthNames[dt.month - 1];
     return '$m ${dt.day}, ${dt.year}';
   } catch (_) {}
@@ -975,20 +1006,7 @@ String? formatReleaseDate(String? iso) {
   if (parts.length == 1) {
     return parts[0];
   } else if (parts.length == 2) {
-    const monthNames = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec'
-    ];
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     final year = parts[0];
     final monthIndex = int.tryParse(parts[1]) ?? 1;
     final m = monthNames[(monthIndex - 1).clamp(0, 11)];
