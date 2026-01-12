@@ -555,7 +555,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                         durationLabel = '$minutes:${seconds.toString().padLeft(2, '0')}';
                       }
 
-                      final discPrefix = hasMultipleDiscs ? 'Disc $disc - ' : '';
+                      final discPrefix = hasMultipleDiscs ? 'Disc $disc ' : '';
 
                       return Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -770,7 +770,7 @@ class _YourReviewSection extends StatelessWidget {
                           );
                         },
                         icon: const Icon(Icons.rate_review),
-                        label: Text(hasReview ? 'Edit rating / review' : 'Rate this album'),
+                        label: Text(hasReview ? 'Edit Rating / Review' : 'Rate This album'),
                       ),
                       const SizedBox(width: 12),
                       if (hasReview)
@@ -779,7 +779,7 @@ class _YourReviewSection extends StatelessWidget {
                             final ok = await showDialog<bool>(
                               context: context,
                               builder: (ctx) => AlertDialog(
-                                title: const Text('Delete review?'),
+                                title: const Text('Delete Review?'),
                                 content: const Text('This cannot be undone.'),
                                 actions: [
                                   TextButton(
@@ -798,7 +798,7 @@ class _YourReviewSection extends StatelessWidget {
                               await myReviewRef.delete();
                               if (context.mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Review deleted')),
+                                  const SnackBar(content: Text('Review Deleted')),
                                 );
                               }
                             }
@@ -870,7 +870,7 @@ class _CommunityReviewsSection extends StatelessWidget {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('Community reviews: $count'),
+                      Text('Community Reviews: $count'),
                       Text(
                         avg == null ? 'Avg: -' : 'Avg: ${avg.toStringAsFixed(1)}/10',
                         style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),

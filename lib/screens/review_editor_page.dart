@@ -130,7 +130,7 @@ class _ReviewEditorPageState extends State<ReviewEditorPage> {
               const SizedBox(height: 24),
 
               Text(
-                'Your thoughts (optional)',
+                'Your Thoughts (Optional)',
                 style: theme.textTheme.titleMedium
                     ?.copyWith(fontWeight: FontWeight.w600),
               ),
@@ -159,7 +159,7 @@ class _ReviewEditorPageState extends State<ReviewEditorPage> {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.check),
-                  label: Text(_saving ? 'Saving…' : 'Save rating'),
+                  label: Text(_saving ? 'Saving…' : 'Save Rating'),
                 ),
               ),
             ],
