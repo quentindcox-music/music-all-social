@@ -1,57 +1,45 @@
 // lib/screens/album_detail_page.dart
 
-import 'dart:async';
-
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:palette_generator/palette_generator.dart';
 
-import '../services/recently_viewed_service.dart';
+import '../providers/album_providers.dart';
+import '../providers/favorites_controller.dart';
+import '../providers/favorites_providers.dart';
+import '../providers/firebase_providers.dart';
+import '../providers/review_providers.dart';
+import '../providers/user_profile_providers.dart';
 import '../services/musicbrainz_service.dart';
+import '../services/recently_viewed_service.dart';
 import 'artist_detail_page.dart';
 import 'review_editor_page.dart';
 
-class AlbumDetailPage extends StatefulWidget {
+class AlbumDetailPage extends ConsumerStatefulWidget {
   const AlbumDetailPage({super.key, required this.albumId});
 
   /// This is a MusicBrainz *release-group* id (same as your album doc id in Firestore).
   final String albumId;
 
   @override
-  State<AlbumDetailPage> createState() => _AlbumDetailPageState();
+  ConsumerState<AlbumDetailPage> createState() => _AlbumDetailPageState();
 }
 
-class _AlbumDetailPageState extends State<AlbumDetailPage> {
-  // Palette / gradient
+class _AlbumDetailPageState extends ConsumerState<AlbumDetailPage> {
+  // -----------------------------
+  // Palette / gradient (Improved)
+  // -----------------------------
   Color? _dominantColor;
   String? _paletteForCoverUrl;
 
-  Future<void> _generatePalette(String coverUrl, ThemeData theme) async {
-    if (coverUrl.isEmpty) return;
-    if (_paletteForCoverUrl == coverUrl && _dominantColor != null) return;
+  static final Map<String, Color> _dominantColorCache = <String, Color>{};
+  static final Map<String, Future<Color>> _dominantColorFutures = <String, Future<Color>>{};
 
-    try {
-      final palette = await PaletteGenerator.fromImageProvider(
-        NetworkImage(coverUrl),
-        maximumColorCount: 20,
-      );
-
-      final color = palette.vibrantColor?.color ??
-          palette.lightVibrantColor?.color ??
-          palette.mutedColor?.color ??
-          palette.dominantColor?.color ??
-          theme.colorScheme.primary;
-
-      if (!mounted) return;
-      setState(() {
-        _paletteForCoverUrl = coverUrl;
-        _dominantColor = color;
-      });
-    } catch (_) {}
-  }
-
-  // Track sync state
+  // -----------------------------
+  // Track sync state (Optimized)
+  // -----------------------------
   bool _syncingTracks = false;
   String? _trackSyncError;
   bool _trackSyncTriggered = false;
@@ -59,15 +47,177 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   // Prevent repeated recently-viewed writes
   bool _markedViewed = false;
 
-  Future<bool> _shouldSyncTracks(
-    DocumentReference<Map<String, dynamic>> albumRef, {
-    Duration ttl = const Duration(days: 7),
-  }) async {
-    final existing = await albumRef.collection('tracks').limit(1).get();
-    if (existing.docs.isEmpty) return true;
+  late final ProviderSubscription<Map<String, dynamic>?> _albumSub;
+  late final ProviderSubscription<String> _uidSub;
 
-    final albumSnap = await albumRef.get();
-    final ts = albumSnap.data()?['lastTracksSyncAt'] as Timestamp?;
+  // ✅ Listen to favorite controller errors once (no duplicate snackbars).
+  late final ProviderSubscription<AsyncValue<void>> _favOpSub;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _albumSub = ref.listenManual<Map<String, dynamic>?>(
+      albumDataProvider(widget.albumId),
+      (prev, next) => _maybeRunEffects(album: next, uid: ref.read(uidProvider)),
+    );
+
+    _uidSub = ref.listenManual<String>(
+      uidProvider,
+      (prev, next) => _maybeRunEffects(
+        album: ref.read(albumDataProvider(widget.albumId)),
+        uid: next,
+      ),
+    );
+
+    _favOpSub = ref.listenManual<AsyncValue<void>>(
+      favoriteAlbumControllerProvider(widget.albumId),
+      (prev, next) {
+        next.whenOrNull(
+          error: (e, _) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Favorite failed: $e')),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _albumSub.close();
+    _uidSub.close();
+    _favOpSub.close();
+    super.dispose();
+  }
+
+  void _maybeRunEffects({required Map<String, dynamic>? album, required String uid}) {
+    if (album == null) return;
+
+    final title = (album['title'] ?? '') as String;
+    final artist = (album['primaryArtistName'] ?? '') as String;
+    final coverUrl = (album['coverUrl'] as String?)?.trim() ?? '';
+
+    final primaryArtistId =
+        (album['primaryArtistId'] as String?) ?? (album['primaryArtistID'] as String?) ?? '';
+
+    final syncVersionNum = album['tracksSyncVersion'] as num?;
+    final int syncVersion = syncVersionNum?.toInt() ?? 0;
+
+    // Mark viewed once per open (also works if user signs in while on page)
+    if (uid.isNotEmpty && !_markedViewed) {
+      _markedViewed = true;
+      // ignore: discarded_futures
+      RecentlyViewedService.markAlbumViewed(
+        uid: uid,
+        albumId: widget.albumId,
+        title: title,
+        primaryArtistName: artist,
+        primaryArtistId: primaryArtistId,
+        coverUrl: coverUrl,
+      );
+    }
+
+    // Auto-sync tracklist once (never from build)
+    if (!_trackSyncTriggered) {
+      _trackSyncTriggered = true;
+
+      final shouldSync = _shouldSyncTracksFromAlbumDoc(album, ttl: const Duration(days: 7));
+      if (shouldSync) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          // ignore: discarded_futures
+          _syncTracklist(
+            ref.read(albumRefProvider(widget.albumId)),
+            currentSyncVersion: syncVersion,
+            force: false,
+          );
+        });
+      }
+    }
+  }
+
+  void _ensurePaletteForCoverUrl(String coverUrl, ThemeData theme) {
+    final url = coverUrl.trim();
+    if (url.isEmpty) return;
+
+    if (_paletteForCoverUrl == url && _dominantColor != null) return;
+
+    final cached = _dominantColorCache[url];
+    if (cached != null) {
+      _paletteForCoverUrl = url;
+      if (_dominantColor != cached) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          if (_paletteForCoverUrl != url) return;
+          setState(() => _dominantColor = cached);
+        });
+      }
+      return;
+    }
+
+    _paletteForCoverUrl = url;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+
+      final requestUrl = url;
+
+      final future = _dominantColorFutures.putIfAbsent(requestUrl, () async {
+        try {
+          final provider = CachedNetworkImageProvider(requestUrl);
+
+          try {
+            await precacheImage(provider, context);
+          } catch (e, st) {
+            debugPrint('precacheImage failed for $requestUrl: $e');
+            debugPrint('$st');
+          }
+
+          final palette = await PaletteGenerator.fromImageProvider(
+            provider,
+            size: const Size(128, 128),
+            maximumColorCount: 16,
+          );
+
+          final color = palette.vibrantColor?.color ??
+              palette.lightVibrantColor?.color ??
+              palette.mutedColor?.color ??
+              palette.dominantColor?.color ??
+              theme.colorScheme.primary;
+
+          return color;
+        } catch (e, st) {
+          debugPrint('Palette generation failed for $requestUrl: $e');
+          debugPrint('$st');
+          return theme.colorScheme.primary;
+        }
+      });
+
+      final color = await future;
+
+      if (!mounted) return;
+      if (_paletteForCoverUrl != requestUrl) return;
+
+      _dominantColorCache[requestUrl] = color;
+
+      if (_dominantColor != color) {
+        setState(() => _dominantColor = color);
+      }
+    });
+  }
+
+  bool _shouldSyncTracksFromAlbumDoc(
+    Map<String, dynamic> album, {
+    Duration ttl = const Duration(days: 7),
+  }) {
+    final countNum = album['tracksCount'] as num?;
+    final tracksCount = countNum?.toInt() ?? 0;
+
+    final ts = album['lastTracksSyncAt'] as Timestamp?;
+    if (tracksCount <= 0) return true;
     if (ts == null) return true;
 
     return DateTime.now().difference(ts.toDate()) > ttl;
@@ -75,16 +225,12 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
   Future<void> _syncTracklist(
     DocumentReference<Map<String, dynamic>> albumRef, {
+    required int currentSyncVersion,
     bool force = false,
   }) async {
     if (_syncingTracks) return;
 
     try {
-      if (!force) {
-        final should = await _shouldSyncTracks(albumRef);
-        if (!should) return;
-      }
-
       if (mounted) {
         setState(() {
           _syncingTracks = true;
@@ -97,36 +243,16 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         userAgent: 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
       );
 
-      await albumRef.set({
-        'primaryReleaseId': result.releaseId,
-        'lastTracksSyncAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+      final int newVersion = currentSyncVersion + 1;
 
-      // Clean old tracks (optional)
-      final old = await albumRef.collection('tracks').get();
-      if (old.docs.isNotEmpty) {
-        WriteBatch delBatch = FirebaseFirestore.instance.batch();
-        int delCount = 0;
-        for (final d in old.docs) {
-          delBatch.delete(d.reference);
-          delCount++;
-          if (delCount >= 450) {
-            await delBatch.commit();
-            delBatch = FirebaseFirestore.instance.batch();
-            delCount = 0;
-          }
-        }
-        if (delCount > 0) await delBatch.commit();
-      }
-
-      WriteBatch batch = FirebaseFirestore.instance.batch();
+      WriteBatch batch = ref.read(firestoreProvider).batch();
       int count = 0;
 
       Future<void> commit({bool forceCommit = false}) async {
         if (count == 0) return;
         if (forceCommit || count >= 450) {
           await batch.commit();
-          batch = FirebaseFirestore.instance.batch();
+          batch = ref.read(firestoreProvider).batch();
           count = 0;
         }
       }
@@ -136,9 +262,9 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         final pos = (t['position'] as int?) ?? 0;
         final trackId = 'd$disc-p$pos';
 
-        final ref = albumRef.collection('tracks').doc(trackId);
+        final refDoc = albumRef.collection('tracks').doc(trackId);
         batch.set(
-          ref,
+          refDoc,
           {
             'id': trackId,
             'title': (t['title'] as String?)?.trim().isNotEmpty == true
@@ -148,6 +274,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
             'position': pos,
             if (t['durationSeconds'] != null) 'durationSeconds': t['durationSeconds'],
             if (t['recordingId'] != null) 'recordingId': t['recordingId'],
+            'syncVersion': newVersion,
             'updatedAt': FieldValue.serverTimestamp(),
             'source': 'musicbrainz',
           },
@@ -159,7 +286,16 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       }
 
       await commit(forceCommit: true);
-    } catch (e) {
+
+      await albumRef.set({
+        'primaryReleaseId': result.releaseId,
+        'tracksCount': result.tracks.length,
+        'tracksSyncVersion': newVersion,
+        'lastTracksSyncAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e, st) {
+      debugPrint('Track sync failed for album ${widget.albumId}: $e');
+      debugPrint('$st');
       if (mounted) setState(() => _trackSyncError = e.toString());
     } finally {
       if (mounted) setState(() => _syncingTracks = false);
@@ -167,6 +303,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   }
 
   Future<void> _toggleFavoriteAlbum({
+    required bool isFav,
     required String uid,
     required String albumId,
     required String title,
@@ -176,66 +313,53 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   }) async {
     if (uid.isEmpty) return;
 
-    final favRef = FirebaseFirestore.instance
-        .collection('users')
-        .doc(uid)
-        .collection('favorites_albums')
-        .doc(albumId);
+    final notifier = ref.read(favoriteAlbumControllerProvider(albumId).notifier);
 
-    final snap = await favRef.get();
-    if (snap.exists) {
-      await favRef.delete();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Removed from favorites')),
-        );
-      }
-    } else {
-      await favRef.set({
-        'albumId': albumId,
-        'title': title,
-        'primaryArtistName': primaryArtistName,
-        if (primaryArtistId.trim().isNotEmpty) 'primaryArtistId': primaryArtistId.trim(),
-        'coverUrl': coverUrl,
-        'createdAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+    await notifier.toggle(
+      isCurrentlyFav: isFav,
+      payload: FavoriteAlbumPayload(
+        albumId: albumId,
+        title: title,
+        primaryArtistName: primaryArtistName,
+        primaryArtistId: primaryArtistId,
+        coverUrl: coverUrl,
+      ),
+    );
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Added to favorites')),
-        );
-      }
-    }
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(isFav ? 'Removed from favorites' : 'Added to favorites'),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final albumRef =
-        FirebaseFirestore.instance.collection('albums').doc(widget.albumId);
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     final theme = Theme.of(context);
 
-    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: albumRef.snapshots(),
-      builder: (context, albumSnap) {
-        if (albumSnap.hasError) {
-          return Scaffold(
-            appBar: AppBar(title: const Text('Album')),
-            body: Center(
-              child: Text('Something went wrong: ${albumSnap.error}'),
-            ),
-          );
-        }
+    final uid = ref.watch(uidProvider);
+    final albumRef = ref.watch(albumRefProvider(widget.albumId));
 
-        if (!albumSnap.hasData) {
-          return Scaffold(
-            appBar: AppBar(title: Text('Album')),
-            body: Center(child: CircularProgressIndicator()),
-          );
-        }
+    // still derived from your existing favorites stream providers
+    final isFav = ref.watch(isFavoriteAlbumProvider(widget.albumId));
 
-        final album = albumSnap.data?.data();
+    // busy flag from controller
+    final favBusy = ref.watch(favoriteAlbumBusyProvider(widget.albumId));
+
+    final albumAsync = ref.watch(albumDocProvider(widget.albumId));
+
+    return albumAsync.when(
+      loading: () => const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      ),
+      error: (e, _) => Scaffold(
+        appBar: AppBar(title: const Text('Album')),
+        body: Center(child: Text('Something went wrong: $e')),
+      ),
+      data: (albumSnap) {
+        final album = albumSnap.data();
         if (album == null) {
           return Scaffold(
             appBar: AppBar(title: const Text('Album')),
@@ -246,79 +370,63 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         final title = (album['title'] ?? '') as String;
         final artist = (album['primaryArtistName'] ?? '') as String;
 
-        // Support both legacy and new field names.
-        final primaryArtistId = (album['primaryArtistId'] as String?) ??
-            (album['primaryArtistID'] as String?) ??
-            '';
+        final primaryArtistId =
+            (album['primaryArtistId'] as String?) ?? (album['primaryArtistID'] as String?) ?? '';
 
         final firstReleaseDate = (album['firstReleaseDate'] ?? '') as String?;
         final primaryType = (album['primaryType'] ?? '') as String?;
         final coverUrl = (album['coverUrl'] as String?)?.trim() ?? '';
 
-        // Mark viewed once per open (prevents repeated writes on rebuilds)
-        if (uid.isNotEmpty && !_markedViewed) {
-          _markedViewed = true;
-          // ignore: discarded_futures
-          RecentlyViewedService.markAlbumViewed(
-            uid: uid,
-            albumId: widget.albumId,
-            title: title,
-            primaryArtistName: artist,
-            primaryArtistId: primaryArtistId,
-            coverUrl: coverUrl,
-          );
-        }
+        final syncVersionNum = album['tracksSyncVersion'] as num?;
+        final int syncVersion = syncVersionNum?.toInt() ?? 0;
 
-        _generatePalette(coverUrl, theme);
-
-        if (!_trackSyncTriggered) {
-          _trackSyncTriggered = true;
-          // ignore: discarded_futures
-          _syncTracklist(albumRef);
-        }
+        _ensurePaletteForCoverUrl(coverUrl, theme);
 
         final releaseLabel = formatReleaseDate(firstReleaseDate);
+
         final baseColor = _dominantColor ?? theme.colorScheme.surface;
-        final darkenedColor = Color.lerp(baseColor, Colors.black, 0.4)!;
+        final topColor = Color.lerp(baseColor, Colors.black, 0.35)!;
         final bottomColor = theme.colorScheme.surface;
 
-        final favRef = uid.isEmpty
-            ? null
-            : FirebaseFirestore.instance
-                .collection('users')
-                .doc(uid)
-                .collection('favorites_albums')
-                .doc(widget.albumId);
+        final tracksAsync = ref.watch(tracksProvider(widget.albumId));
 
         return Scaffold(
           appBar: AppBar(
             title: const Text('Album'),
             actions: [
-              if (favRef != null)
-                StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                  stream: favRef.snapshots(),
-                  builder: (context, favSnap) {
-                    final isFav = favSnap.data?.exists == true;
-                    return IconButton(
-                      tooltip: isFav ? 'Unfavorite' : 'Favorite',
-                      icon: Icon(isFav ? Icons.favorite : Icons.favorite_border),
-                      onPressed: () => _toggleFavoriteAlbum(
-                        uid: uid,
-                        albumId: widget.albumId,
-                        title: title,
-                        primaryArtistName: artist,
-                        primaryArtistId: primaryArtistId,
-                        coverUrl: coverUrl,
-                      ),
-                    );
-                  },
+              if (uid.isNotEmpty)
+                IconButton(
+                  tooltip: isFav ? 'Unfavorite' : 'Favorite',
+                  onPressed: favBusy
+                      ? null
+                      : () => _toggleFavoriteAlbum(
+                            isFav: isFav,
+                            uid: uid,
+                            albumId: widget.albumId,
+                            title: title,
+                            primaryArtistName: artist,
+                            primaryArtistId: primaryArtistId,
+                            coverUrl: coverUrl,
+                          ),
+                  icon: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Icon(isFav ? Icons.favorite : Icons.favorite_border),
+                      if (favBusy)
+                        const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                    ],
+                  ),
                 ),
             ],
           ),
           body: ListView(
             padding: EdgeInsets.zero,
             children: [
-              // Hero area
+              // Hero
               Container(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
                 decoration: BoxDecoration(
@@ -327,8 +435,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                     end: Alignment.bottomCenter,
                     stops: const [0.0, 0.6, 1.0],
                     colors: [
-                      darkenedColor,
-                      darkenedColor.withValues(alpha: 0.6),
+                      topColor.withValues(alpha: 0.95),
+                      topColor.withValues(alpha: 0.55),
                       bottomColor,
                     ],
                   ),
@@ -353,11 +461,11 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                           height: 220,
                           width: 220,
                           child: coverUrl.isNotEmpty
-                              ? Image.network(
-                                  coverUrl,
+                              ? CachedNetworkImage(
+                                  imageUrl: coverUrl,
                                   fit: BoxFit.cover,
-                                  errorBuilder: (_, _, _) =>
-                                      _AlbumArtPlaceholder(title: title),
+                                  placeholder: (_, _) => _AlbumArtPlaceholder(title: title),
+                                  errorWidget: (_, _, _) => _AlbumArtPlaceholder(title: title),
                                 )
                               : _AlbumArtPlaceholder(title: title),
                         ),
@@ -396,8 +504,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                           textAlign: TextAlign.center,
                           style: theme.textTheme.titleLarge?.copyWith(
                             fontWeight: FontWeight.w800,
-                            color: const Color.fromARGB(255, 146, 106, 255)
-                                .withValues(alpha: 0.95),
+                            color: theme.colorScheme.primary.withValues(alpha: 0.95),
                             letterSpacing: 0.3,
                           ),
                         ),
@@ -408,8 +515,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                         textAlign: TextAlign.center,
                         style: theme.textTheme.titleLarge?.copyWith(
                           fontWeight: FontWeight.w800,
-                          color: const Color.fromARGB(255, 146, 106, 255)
-                              .withValues(alpha: 0.95),
+                          color: theme.colorScheme.primary.withValues(alpha: 0.95),
                         ),
                       ),
                     const SizedBox(height: 14),
@@ -436,7 +542,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
               const Divider(height: 1),
 
-              // Tracklist Header + Controls
+              // Tracklist header
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 child: Row(
@@ -459,7 +565,14 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                       tooltip: 'Refresh tracklist',
                       onPressed: _syncingTracks
                           ? null
-                          : () => _syncTracklist(albumRef, force: true),
+                          : () {
+                              // ignore: discarded_futures
+                              _syncTracklist(
+                                albumRef,
+                                currentSyncVersion: syncVersion,
+                                force: true,
+                              );
+                            },
                       icon: const Icon(Icons.refresh),
                     ),
                   ],
@@ -477,36 +590,21 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   ),
                 ),
 
-              StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                stream: albumRef
-                    .collection('tracks')
-                    .orderBy('disc')
-                    .orderBy('position')
-                    .snapshots(),
-                builder: (context, snap) {
-                  if (snap.hasError) {
-                    debugPrint('Tracklist error: ${snap.error}');
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      child: Text(
-                        'Could not load tracklist.',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: theme.colorScheme.error,
-                        ),
-                      ),
-                    );
-                  }
-
-                  if (!snap.hasData) {
-                    return const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                      child: Center(
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    );
-                  }
-
-                  final docs = snap.data?.docs ?? [];
+              // Tracklist body
+              tracksAsync.when(
+                loading: () => const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                ),
+                error: (e, _) => Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Text(
+                    'Could not load tracklist.',
+                    style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.error),
+                  ),
+                ),
+                data: (snap) {
+                  final docs = snap.docs;
                   if (docs.isEmpty) {
                     return Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -522,7 +620,14 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                           const SizedBox(height: 10),
                           if (!_syncingTracks)
                             FilledButton.icon(
-                              onPressed: () => _syncTracklist(albumRef, force: true),
+                              onPressed: () {
+                                // ignore: discarded_futures
+                                _syncTracklist(
+                                  albumRef,
+                                  currentSyncVersion: syncVersion,
+                                  force: true,
+                                );
+                              },
                               icon: const Icon(Icons.download),
                               label: const Text('Fetch Tracklist'),
                             ),
@@ -542,9 +647,10 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                       final trackNum = (data['position'] as num?)?.toInt() ?? 0;
                       final disc = (data['disc'] as num?)?.toInt() ?? 1;
 
-                      final tTitle = (data['title'] as String?)?.trim().isNotEmpty == true
-                          ? (data['title'] as String).trim()
-                          : 'Untitled track';
+                      final tTitle =
+                          (data['title'] as String?)?.trim().isNotEmpty == true
+                              ? (data['title'] as String).trim()
+                              : 'Untitled track';
 
                       final durNum = data['durationSeconds'] as num?;
                       String durationLabel = '';
@@ -610,16 +716,11 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
               const SizedBox(height: 24),
 
-              _YourReviewSection(
-                albumRef: albumRef,
-                uid: uid,
-                albumId: widget.albumId,
-              ),
+              // ✅ Reviews now Riverpod-powered
+              _YourReviewSection(albumId: widget.albumId, uid: uid),
               const SizedBox(height: 24),
-              _CommunityReviewsSection(
-                albumRef: albumRef,
-                uid: uid,
-              ),
+              _CommunityReviewsSection(albumId: widget.albumId, uid: uid),
+
               const SizedBox(height: 24),
             ],
           ),
@@ -637,9 +738,7 @@ class _AlbumArtPlaceholder extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final initial = title.trim().isEmpty
-        ? '?'
-        : title.trim().characters.first.toUpperCase();
+    final initial = title.trim().isEmpty ? '?' : title.trim().characters.first.toUpperCase();
 
     return Container(
       color: theme.colorScheme.surfaceContainerHighest,
@@ -686,36 +785,33 @@ class _InfoChip extends StatelessWidget {
   }
 }
 
-class _YourReviewSection extends StatelessWidget {
+// ---------------------------
+// Reviews (Riverpod version)
+// ---------------------------
+
+class _YourReviewSection extends ConsumerWidget {
   const _YourReviewSection({
-    required this.albumRef,
-    required this.uid,
     required this.albumId,
+    required this.uid,
   });
 
-  final DocumentReference<Map<String, dynamic>> albumRef;
-  final String uid;
   final String albumId;
+  final String uid;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final myReviewRef = albumRef.collection('reviews').doc(uid);
 
-    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: myReviewRef.snapshots(),
-      builder: (context, reviewSnap) {
-        if (reviewSnap.hasError) {
-          return Center(
-            child: Text('Could not load your review: ${reviewSnap.error}'),
-          );
-        }
+    if (uid.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
 
-        if (!reviewSnap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
+    final reviewAsync = ref.watch(myReviewProvider((albumId: albumId, uid: uid)));
 
-        final review = reviewSnap.data?.data();
+    return reviewAsync.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => Center(child: Text('Could not load your review: $e')),
+      data: (review) {
         final hasReview = review != null;
 
         final rating = hasReview ? (review['rating'] as num? ?? 0).toDouble() : 0.0;
@@ -749,11 +845,12 @@ class _YourReviewSection extends StatelessWidget {
                     ),
                     const SizedBox(height: 6),
                     if (text.trim().isNotEmpty) Text(text),
-                    if (text.trim().isEmpty)
-                      Text('(No written review)', style: theme.textTheme.bodySmall),
+                    if (text.trim().isEmpty) Text('(No written review)', style: theme.textTheme.bodySmall),
                   ] else
-                    Text('You have not rated this album yet.',
-                        style: theme.textTheme.bodyMedium),
+                    Text(
+                      'You have not rated this album yet.',
+                      style: theme.textTheme.bodyMedium,
+                    ),
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -795,7 +892,14 @@ class _YourReviewSection extends StatelessWidget {
                             );
 
                             if (ok == true) {
-                              await myReviewRef.delete();
+                              await ref
+                                  .read(firestoreProvider)
+                                  .collection('albums')
+                                  .doc(albumId)
+                                  .collection('reviews')
+                                  .doc(uid)
+                                  .delete();
+
                               if (context.mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(content: Text('Review Deleted')),
@@ -817,47 +921,32 @@ class _YourReviewSection extends StatelessWidget {
   }
 }
 
-class _CommunityReviewsSection extends StatelessWidget {
+class _CommunityReviewsSection extends ConsumerWidget {
   const _CommunityReviewsSection({
-    required this.albumRef,
+    required this.albumId,
     required this.uid,
   });
 
-  final DocumentReference<Map<String, dynamic>> albumRef;
+  final String albumId;
   final String uid;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
 
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: albumRef
-          .collection('reviews')
-          .orderBy('updatedAt', descending: true)
-          .limit(200)
-          .snapshots(),
-      builder: (context, listSnap) {
-        if (listSnap.hasError) {
-          return Center(child: Text('Could not load reviews: ${listSnap.error}'));
-        }
+    final reviewsAsync = ref.watch(communityReviewsProvider(albumId));
+    final statsAsync = ref.watch(communityReviewStatsProvider(albumId));
 
-        if (!listSnap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
+    return reviewsAsync.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => Center(child: Text('Could not load reviews: $e')),
+      data: (docs) {
+        final displayDocs = docs.take(20).toList();
 
-        final docs = listSnap.data?.docs ?? const [];
+        final uids = displayDocs.map((d) => d.id).toSet().toList()..sort();
+        final uidsKey = uids.join('|');
 
-        int count = 0;
-        double sum = 0;
-        for (final d in docs) {
-          final data = d.data();
-          final ratingValue = data['rating'];
-          if (ratingValue is num) {
-            sum += ratingValue.toDouble();
-            count += 1;
-          }
-        }
-        final double? avg = count == 0 ? null : (sum / count);
+        final namesAsync = ref.watch(displayNameMapProvider(uidsKey));
 
         return Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -867,15 +956,31 @@ class _CommunityReviewsSection extends StatelessWidget {
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('Community Reviews: $count'),
-                      Text(
-                        avg == null ? 'Avg: -' : 'Avg: ${avg.toStringAsFixed(1)}/10',
-                        style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-                      ),
-                    ],
+                  child: statsAsync.when(
+                    loading: () => const Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Community Reviews: …'),
+                        Text('Avg: …'),
+                      ],
+                    ),
+                    error: (_, _) => const Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Community Reviews: -'),
+                        Text('Avg: -'),
+                      ],
+                    ),
+                    data: (stats) => Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Community Reviews: ${stats.count}'),
+                        Text(
+                          stats.avg == null ? 'Avg: -' : 'Avg: ${stats.avg!.toStringAsFixed(1)}/10',
+                          style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -885,46 +990,91 @@ class _CommunityReviewsSection extends StatelessWidget {
                 style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 10),
-              if (docs.isEmpty)
+              if (displayDocs.isEmpty)
                 const Text('No reviews yet.')
               else
-                Column(
-                  children: docs.take(20).map((d) {
-                    final data = d.data();
-                    final ratingNum = data['rating'];
-                    final rating = ratingNum is num ? ratingNum.toDouble() : 0.0;
-                    final text = (data['text'] as String? ?? '').trim();
-                    final who = d.id;
+                namesAsync.when(
+                  loading: () => Column(
+                    children: displayDocs.map((d) {
+                      final data = d.data();
+                      final ratingNum = data['rating'];
+                      final rating = ratingNum is num ? ratingNum.toDouble() : 0.0;
+                      final text = (data['text'] as String? ?? '').trim();
+                      final who = d.id;
+                      final fallback = who.substring(0, who.length >= 6 ? 6 : who.length);
 
-                    return Card(
-                      margin: const EdgeInsets.only(bottom: 12),
-                      child: ListTile(
-                        leading: _DisplayNameChip(uid: who),
-                        title: Row(
-                          children: [
-                            RatingStars(rating: rating, size: 16),
-                            const SizedBox(width: 8),
-                            Text(
-                              '${rating.toStringAsFixed(1)}/10',
-                              style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-                            ),
-                          ],
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        child: ListTile(
+                          leading: Chip(label: Text(fallback)),
+                          title: Row(
+                            children: [
+                              RatingStars(rating: rating, size: 16),
+                              const SizedBox(width: 8),
+                              Text(
+                                '${rating.toStringAsFixed(1)}/10',
+                                style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                              ),
+                            ],
+                          ),
+                          subtitle: text.isEmpty
+                              ? Text('(No written review)', style: theme.textTheme.bodySmall)
+                              : Text(text, maxLines: 3, overflow: TextOverflow.ellipsis),
+                          trailing: who == uid
+                              ? Text(
+                                  'You',
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.primary,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                )
+                              : null,
                         ),
-                        subtitle: text.isEmpty
-                            ? Text('(No written review)', style: theme.textTheme.bodySmall)
-                            : Text(text, maxLines: 3, overflow: TextOverflow.ellipsis),
-                        trailing: who == uid
-                            ? Text(
-                                'You',
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: theme.colorScheme.primary,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              )
-                            : null,
-                      ),
-                    );
-                  }).toList(),
+                      );
+                    }).toList(),
+                  ),
+                  error: (_, _) => const Text('Could not load user names.'),
+                  data: (nameMap) => Column(
+                    children: displayDocs.map((d) {
+                      final data = d.data();
+                      final ratingNum = data['rating'];
+                      final rating = ratingNum is num ? ratingNum.toDouble() : 0.0;
+                      final text = (data['text'] as String? ?? '').trim();
+                      final who = d.id;
+
+                      final fallback = who.substring(0, who.length >= 6 ? 6 : who.length);
+                      final display = (nameMap[who] ?? fallback).trim();
+
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        child: ListTile(
+                          leading: Chip(label: Text(display)),
+                          title: Row(
+                            children: [
+                              RatingStars(rating: rating, size: 16),
+                              const SizedBox(width: 8),
+                              Text(
+                                '${rating.toStringAsFixed(1)}/10',
+                                style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                              ),
+                            ],
+                          ),
+                          subtitle: text.isEmpty
+                              ? Text('(No written review)', style: theme.textTheme.bodySmall)
+                              : Text(text, maxLines: 3, overflow: TextOverflow.ellipsis),
+                          trailing: who == uid
+                              ? Text(
+                                  'You',
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.primary,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                )
+                              : null,
+                        ),
+                      );
+                    }).toList(),
+                  ),
                 ),
             ],
           ),
@@ -962,31 +1112,6 @@ class RatingStars extends StatelessWidget {
     }
 
     return Row(mainAxisSize: MainAxisSize.min, children: icons);
-  }
-}
-
-class _DisplayNameChip extends StatelessWidget {
-  const _DisplayNameChip({required this.uid});
-
-  final String uid;
-
-  @override
-  Widget build(BuildContext context) {
-    final userRef = FirebaseFirestore.instance.collection('users').doc(uid);
-
-    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: userRef.snapshots(),
-      builder: (context, snap) {
-        final data = snap.data?.data();
-        final name = (data?['displayName'] as String?)?.trim();
-
-        final display = (name != null && name.isNotEmpty)
-            ? name
-            : uid.substring(0, uid.length >= 6 ? 6 : uid.length);
-
-        return Chip(label: Text(display));
-      },
-    );
   }
 }
 

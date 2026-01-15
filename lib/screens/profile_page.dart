@@ -686,7 +686,7 @@ class FavoriteArtistsPage extends StatelessWidget {
                       : d.id;
 
               final name = (data['name'] as String?)?.trim();
-              final thumbUrl = (data['thumbUrl'] as String?)?.trim() ?? '';
+              final imageUrl = (data['imageUrl'] as String?)?.trim() ?? '';
 
               final initial = (name?.trim().isNotEmpty == true)
                   ? name!.trim()[0].toUpperCase()
@@ -734,8 +734,8 @@ class FavoriteArtistsPage extends StatelessWidget {
                   leading: CircleAvatar(
                     radius: 26,
                     backgroundColor: theme.colorScheme.primaryContainer,
-                    backgroundImage: thumbUrl.isNotEmpty ? NetworkImage(thumbUrl) : null,
-                    child: thumbUrl.isEmpty
+                    backgroundImage: imageUrl.isNotEmpty ? NetworkImage(imageUrl) : null,
+                    child: imageUrl.isEmpty
                         ? Text(
                             initial,
                             style: TextStyle(

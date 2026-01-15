@@ -47,6 +47,8 @@ class Album {
     );
   }
 
+  /// Use this for *upserts / updates* (discography sync, metadata refresh, etc.).
+  /// IMPORTANT: This never overwrites createdAt.
   Map<String, dynamic> toFirestore() {
     return {
       'id': id,
@@ -58,6 +60,15 @@ class Album {
       'source': source,
       if (parentAlbumId != null) 'parentAlbumId': parentAlbumId,
       'updatedAt': FieldValue.serverTimestamp(),
+      // ✅ createdAt intentionally omitted here
+    };
+  }
+
+  /// Use this only when you are *creating* a new album doc on purpose.
+  /// Keeps createdAt stable after creation.
+  Map<String, dynamic> toFirestoreCreate() {
+    return {
+      ...toFirestore(),
       'createdAt': FieldValue.serverTimestamp(),
     };
   }

@@ -2,98 +2,20 @@ import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/material.dart';
-
-import 'package:music_all_app/services/musicbrainz_service.dart';
-import 'package:music_all_app/services/fanart_service.dart';
-import 'package:music_all_app/services/deezer_service.dart';
-import 'album_detail_page.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:music_all_app/providers/artist_providers.dart';
+import 'package:music_all_app/providers/firebase_providers.dart';
+import 'package:music_all_app/services/discography_cache_service.dart';
+import 'package:music_all_app/services/musicbrainz_service.dart';
+import 'package:music_all_app/services/deezer_service.dart'; // DeezerTrack
+import 'package:music_all_app/services/fanart_service.dart'; // ArtistImages
 
-/// ------------------------------
-/// Firestore Discography Cache
-/// ------------------------------
-class DiscographyCacheService {
-  DiscographyCacheService(this._db);
+import 'album_detail_page.dart';
 
-  final FirebaseFirestore _db;
-
-  /// Returns true if we should sync (never synced OR older than ttl)
-  Future<bool> shouldSyncArtist(
-    String artistId, {
-    Duration ttl = const Duration(hours: 24),
-  }) async {
-    final ref = _db.collection('artists').doc(artistId);
-    final snap = await ref.get();
-    final ts = snap.data()?['lastDiscographySyncAt'] as Timestamp?;
-    if (ts == null) return true;
-
-    final last = ts.toDate();
-    return DateTime.now().difference(last) > ttl;
-  }
-
-  /// Upserts:
-  /// - artists/{artistId}
-  /// - albums/{releaseGroupId}
-  ///
-  /// NOTE: Firestore batches max 500 writes; we chunk.
-  Future<void> upsertArtistAndAlbums({
-    required String artistId,
-    required String artistName,
-    required List<Map<String, dynamic>> releaseGroups,
-  }) async {
-    final artistRef = _db.collection('artists').doc(artistId);
-    await artistRef.set({
-      'id': artistId,
-      'name': artistName,
-      'source': 'musicbrainz',
-      'lastDiscographySyncAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
-
-    WriteBatch batch = _db.batch();
-    int opCount = 0;
-
-    Future<void> commitIfNeeded({bool force = false}) async {
-      if (opCount == 0) return;
-      if (force || opCount >= 450) {
-        await batch.commit();
-        batch = _db.batch();
-        opCount = 0;
-      }
-    }
-
-    for (final rg in releaseGroups) {
-      final id = rg['id'] as String?;
-      if (id == null || id.isEmpty) continue;
-
-      final albumRef = _db.collection('albums').doc(id);
-
-      final data = <String, dynamic>{
-        'id': id,
-        'title': (rg['title'] as String?) ?? 'Unknown',
-        'firstReleaseDate': rg['firstReleaseDate'], // "YYYY", "YYYY-MM", or "YYYY-MM-DD"
-        'primaryArtistId': artistId, // IMPORTANT: keep this exact casing everywhere
-        'primaryArtistName': artistName,
-        'primaryType': rg['primaryType'],
-        'secondaryTypes': (rg['secondaryTypes'] as List?) ?? <String>[],
-        'source': 'musicbrainz',
-        'coverUrl': 'https://coverartarchive.org/release-group/$id/front-250',
-        'updatedAt': FieldValue.serverTimestamp(),
-        'createdAt': FieldValue.serverTimestamp(),
-      };
-
-      batch.set(albumRef, data, SetOptions(merge: true));
-      opCount++;
-
-      await commitIfNeeded();
-    }
-
-    await commitIfNeeded(force: true);
-  }
-}
-
-class ArtistDetailPage extends StatefulWidget {
+class ArtistDetailPage extends ConsumerStatefulWidget {
   const ArtistDetailPage({
     super.key,
     required this.artistId,
@@ -104,151 +26,95 @@ class ArtistDetailPage extends StatefulWidget {
   final String artistName;
 
   @override
-  State<ArtistDetailPage> createState() => _ArtistDetailPageState();
+  ConsumerState<ArtistDetailPage> createState() => _ArtistDetailPageState();
 }
 
-class _ArtistDetailPageState extends State<ArtistDetailPage> {
-  MbArtist? _artist;
-  ArtistImages? _artistImages;
-  List<Map<String, dynamic>> _allReleases = [];
-  List<DeezerTrack> _topTracks = [];
-
-  bool _loadingHeader = true; // artist + images + top tracks
-  bool _loadingAlbums = true; // firestore snapshot
+class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
   bool _syncing = false;
+  String? _syncError;
+  bool _syncTriggered = false;
 
-  String? _error;
-
-  late final DiscographyCacheService _cache =
-      DiscographyCacheService(FirebaseFirestore.instance);
-
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _albumsSub;
+  late final DiscographyCacheService _cache;
+  ProviderSubscription<AsyncValue<List<Map<String, dynamic>>>>? _albumsSub;
 
   @override
   void initState() {
     super.initState();
-    _startAlbumsListener();
-    _loadHeader();
-    _refreshDiscographyIfNeeded(); // background
+
+    _cache = DiscographyCacheService(ref.read(firestoreProvider));
+
+    // Once the albums provider has a value, trigger background sync if needed.
+    _albumsSub = ref.listenManual<AsyncValue<List<Map<String, dynamic>>>>(
+      artistAlbumsProvider(widget.artistId),
+      (prev, next) {
+        final albums = next.valueOrNull;
+        if (albums == null) return;
+        _maybeRefreshDiscography(albums);
+      },
+    );
   }
 
   @override
   void dispose() {
-    _albumsSub?.cancel();
+    _albumsSub?.close();
     super.dispose();
   }
 
-  /// Firestore-first: keep the UI always reflecting what’s stored in Firestore.
-  void _startAlbumsListener() {
-    final query = FirebaseFirestore.instance
-        .collection('albums')
-        .where('primaryArtistId', isEqualTo: widget.artistId)
-        .orderBy('firstReleaseDate', descending: true);
-
-    _albumsSub = query.snapshots().listen(
-      (snap) {
-        final releases = snap.docs.map((d) {
-          final data = d.data();
-          data['id'] ??= d.id;
-          // Normalize secondaryTypes to List<String>
-          final sec = data['secondaryTypes'];
-          if (sec is! List) data['secondaryTypes'] = <String>[];
-          return Map<String, dynamic>.from(data);
-        }).toList();
-
-        if (!mounted) return;
-        setState(() {
-          _allReleases = releases;
-          _loadingAlbums = false;
-        });
-      },
-      onError: (e) {
-        if (!mounted) return;
-        setState(() {
-          _error = e.toString();
-          _loadingAlbums = false;
-        });
-      },
-    );
-  }
-
-  /// Network header bits (artist meta + images + top tracks)
-  Future<void> _loadHeader() async {
-    setState(() {
-      _loadingHeader = true;
-      _error = null;
-    });
+  Future<void> _maybeRefreshDiscography(List<Map<String, dynamic>> existingAlbums) async {
+    if (_syncTriggered) return;
+    _syncTriggered = true;
 
     try {
-      final results = await Future.wait([
-        MusicBrainzService.fetchArtistDetails(widget.artistId),
-        FanartService.getArtistImages(widget.artistId),
-        DeezerService.getArtistTopTracks(widget.artistName),
-      ]);
+      final hasAnyAlbums = existingAlbums.isNotEmpty;
 
-      final artist = results[0] as MbArtist?;
-      final images = results[1] as ArtistImages?;
-      final topTracks = results[2] as List<DeezerTrack>;
+      final shouldSync = !hasAnyAlbums ||
+          await _cache.shouldSyncArtist(
+            widget.artistId,
+            ttl: const Duration(hours: 24),
+          );
 
-      if (!mounted) return;
-      setState(() {
-        _artist = artist;
-        _artistImages = images;
-        _topTracks = topTracks;
-        _loadingHeader = false;
-      });
+      if (!shouldSync) return;
+
+      if (mounted) setState(() => _syncing = true);
+
+      final albums = await MusicBrainzService.fetchArtistReleaseGroups(widget.artistId);
+
+      await _cache.upsertArtistAndAlbums(
+        artistId: widget.artistId,
+        artistName: widget.artistName,
+        releaseGroups: albums,
+      );
     } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.toString();
-        _loadingHeader = false;
-      });
+      if (mounted) setState(() => _syncError = e.toString());
+    } finally {
+      if (mounted) setState(() => _syncing = false);
     }
   }
 
-Future<void> _refreshDiscographyIfNeeded() async {
-  try {
-    final existing = await FirebaseFirestore.instance
-        .collection('albums')
-        .where('primaryArtistId', isEqualTo: widget.artistId)
-        .limit(1)
-        .get();
+  Future<void> _forceRefreshDiscography() async {
+    try {
+      if (mounted) {
+        setState(() {
+          _syncing = true;
+          _syncError = null;
+        });
+      }
 
-    final hasAnyAlbums = existing.docs.isNotEmpty;
+      final albums = await MusicBrainzService.fetchArtistReleaseGroups(widget.artistId);
 
-    final shouldSync = !hasAnyAlbums ||
-        await _cache.shouldSyncArtist(
-          widget.artistId,
-          ttl: const Duration(hours: 24),
-        );
-
-    if (!shouldSync) return;
-
-    if (mounted) {
-      setState(() => _syncing = true);
-    }
-
-    final albums =
-        await MusicBrainzService.fetchArtistReleaseGroups(widget.artistId);
-
-    await _cache.upsertArtistAndAlbums(
-      artistId: widget.artistId,
-      artistName: widget.artistName,
-      releaseGroups: albums,
-    );
-  } catch (e) {
-    if (mounted) {
-      setState(() => _error = e.toString());
-    }
-  } finally {
-    if (mounted) {
-      setState(() => _syncing = false);
+      await _cache.upsertArtistAndAlbums(
+        artistId: widget.artistId,
+        artistName: widget.artistName,
+        releaseGroups: albums,
+      );
+    } catch (e) {
+      if (mounted) setState(() => _syncError = e.toString());
+    } finally {
+      if (mounted) setState(() => _syncing = false);
     }
   }
-}
 
-
-  // --- Filtering / Sorting (unchanged) ---
+  // --- Filtering / Sorting ---
   List<Map<String, dynamic>> _sortByDateDescending(List<Map<String, dynamic>> albums) {
     albums.sort((a, b) {
       final dateA = a['firstReleaseDate'] as String? ?? '0000';
@@ -258,36 +124,45 @@ Future<void> _refreshDiscographyIfNeeded() async {
     return albums;
   }
 
-  List<Map<String, dynamic>> get _studioAlbums {
-    final albums = _allReleases.where((r) {
+  List<Map<String, dynamic>> _studioAlbums(List<Map<String, dynamic>> all) {
+    const excludeTypes = [
+      'Live',
+      'Compilation',
+      'Soundtrack',
+      'Spokenword',
+      'Interview',
+      'DJ-mix',
+    ];
+
+    final albums = all.where((r) {
       final type = r['primaryType'] as String?;
       final secondary = r['secondaryTypes'] as List?;
       if (type != 'Album') return false;
       if (secondary == null || secondary.isEmpty) return true;
-      final excludeTypes = ['Live', 'Compilation', 'Soundtrack', 'Spokenword', 'Interview', 'DJ-mix'];
       return !secondary.any((s) => excludeTypes.contains(s));
     }).toList();
+
     return _sortByDateDescending(albums);
   }
 
-  List<Map<String, dynamic>> get _liveAlbums {
-    final albums = _allReleases.where((r) {
+  List<Map<String, dynamic>> _liveAlbums(List<Map<String, dynamic>> all) {
+    final albums = all.where((r) {
       final secondary = r['secondaryTypes'] as List?;
       return secondary != null && secondary.contains('Live');
     }).toList();
     return _sortByDateDescending(albums);
   }
 
-  List<Map<String, dynamic>> get _singlesEps {
-    final albums = _allReleases.where((r) {
+  List<Map<String, dynamic>> _singlesEps(List<Map<String, dynamic>> all) {
+    final albums = all.where((r) {
       final type = r['primaryType'] as String?;
       return type == 'Single' || type == 'EP';
     }).toList();
     return _sortByDateDescending(albums);
   }
 
-  List<Map<String, dynamic>> get _compilations {
-    final albums = _allReleases.where((r) {
+  List<Map<String, dynamic>> _compilations(List<Map<String, dynamic>> all) {
+    final albums = all.where((r) {
       final secondary = r['secondaryTypes'] as List?;
       return secondary != null && secondary.contains('Compilation');
     }).toList();
@@ -298,127 +173,133 @@ Future<void> _refreshDiscographyIfNeeded() async {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    final showBlockingLoader = _loadingHeader && _loadingAlbums && _error == null;
+    final headerAsync = ref.watch(
+      artistHeaderProvider((artistId: widget.artistId, artistName: widget.artistName)),
+    );
+
+    final albumsAsync = ref.watch(artistAlbumsProvider(widget.artistId));
+
+    final header = headerAsync.valueOrNull;
+    final allReleases = albumsAsync.valueOrNull ?? <Map<String, dynamic>>[];
+
+    final showBlockingLoader = headerAsync.isLoading && albumsAsync.isLoading && _syncError == null;
+
+    if (showBlockingLoader) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    if (_syncError != null) {
+      return Scaffold(body: Center(child: Text('Error: $_syncError')));
+    }
+
+    final artist = header?.artist;
+    final images = header?.images;
+    final topTracks = header?.topTracks ?? const <DeezerTrack>[];
+
+    final studio = _studioAlbums(allReleases);
+    final singles = _singlesEps(allReleases);
+    final live = _liveAlbums(allReleases);
+    final comps = _compilations(allReleases);
 
     return Scaffold(
-      body: showBlockingLoader
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(child: Text('Error: $_error'))
-              : CustomScrollView(
-                  slivers: [
-                    SliverAppBar(
-  expandedHeight: 280,
-  pinned: true,
-  stretch: true,
-  backgroundColor: theme.colorScheme.surface,
-  actions: [
-    FavoriteArtistButton(
-      artistId: widget.artistId,
-      artistName: widget.artistName,
-      imageUrl: _artistImages?.artistThumb ?? _artistImages?.artistBackground,
-    ),
-  ],
-  flexibleSpace: FlexibleSpaceBar(
-    title: Text(
-      widget.artistName,
-      style: TextStyle(
-        color: Colors.white,
-        fontWeight: FontWeight.bold,
-        fontSize: 20,
-        shadows: [
-          Shadow(
-            color: Colors.black.withValues(alpha: 0.7),
-            blurRadius: 8,
-          ),
-        ],
-      ),
-    ),
-    titlePadding: const EdgeInsets.only(left: 16, bottom: 16),
-    background: _buildHeroImage(theme),
-  ),
-),
-
-
-                    // Optional sync indicator
-                    if (_syncing)
-                      const SliverToBoxAdapter(
-                        child: LinearProgressIndicator(minHeight: 2),
-                      ),
-
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: _artist != null
-                            ? Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
-                                children: [
-                                  if (_artist!.type != null)
-                                    _InfoChip(Icons.person_outline, _artist!.type!),
-                                  if (_artist!.country != null)
-                                    _InfoChip(Icons.location_on_outlined, _artist!.country!),
-                                  if (_artist!.beginArea != null)
-                                    _InfoChip(Icons.home_outlined, _artist!.beginArea!),
-                                  if (_artist!.lifeSpan != null)
-                                    _InfoChip(Icons.calendar_today_outlined, _artist!.lifeSpan!),
-                                ],
-                              )
-                            : const SizedBox.shrink(),
-                      ),
+      body: CustomScrollView(
+        slivers: [
+          SliverAppBar(
+            expandedHeight: 280,
+            pinned: true,
+            stretch: true,
+            backgroundColor: theme.colorScheme.surface,
+            actions: [
+              FavoriteArtistButton(
+                artistId: widget.artistId,
+                artistName: widget.artistName,
+                imageUrl: images?.artistThumb ?? images?.artistBackground,
+              ),
+            ],
+            flexibleSpace: FlexibleSpaceBar(
+              title: Text(
+                widget.artistName,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 20,
+                  shadows: [
+                    Shadow(
+                      color: Colors.black.withValues(alpha: 0.7),
+                      blurRadius: 8,
                     ),
-
-                    if (_topTracks.isNotEmpty)
-                      SliverToBoxAdapter(child: _buildTopTracksSection(context)),
-
-                    // Discography (from Firestore cache)
-                    if (_loadingAlbums && _allReleases.isEmpty)
-                      const SliverToBoxAdapter(
-                        child: Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Center(child: CircularProgressIndicator()),
-                        ),
-                      )
-                    else ...[
-                      if (_studioAlbums.isNotEmpty)
-                        _buildSection(context, title: 'Albums', releases: _studioAlbums, maxItems: 6),
-                      if (_singlesEps.isNotEmpty)
-                        _buildSection(context, title: 'Singles & EPs', releases: _singlesEps, maxItems: 6),
-                      if (_liveAlbums.isNotEmpty)
-                        _buildSection(context, title: 'Live Albums', releases: _liveAlbums, maxItems: 6),
-                      if (_compilations.isNotEmpty)
-                        _buildSection(context, title: 'Compilations', releases: _compilations, maxItems: 6),
-                      if (_allReleases.isEmpty)
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.all(24),
-                            child: Column(
-                              children: [
-                                Text(
-                                  'No discography cached yet.',
-                                  style: theme.textTheme.bodyMedium,
-                                ),
-                                const SizedBox(height: 12),
-                                ElevatedButton.icon(
-                                  onPressed: _syncing ? null : _refreshDiscographyIfNeeded,
-                                  icon: const Icon(Icons.refresh),
-                                  label: const Text('Fetch Discography'),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                    ],
-
-                    const SliverToBoxAdapter(child: SizedBox(height: 32)),
                   ],
                 ),
+              ),
+              titlePadding: const EdgeInsets.only(left: 16, bottom: 16),
+              background: _buildHeroImage(theme, images),
+            ),
+          ),
+
+          if (_syncing)
+            const SliverToBoxAdapter(
+              child: LinearProgressIndicator(minHeight: 2),
+            ),
+
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: artist != null
+                  ? Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        if (artist.type != null) _InfoChip(Icons.person_outline, artist.type!),
+                        if (artist.country != null) _InfoChip(Icons.location_on_outlined, artist.country!),
+                        if (artist.beginArea != null) _InfoChip(Icons.home_outlined, artist.beginArea!),
+                        if (artist.lifeSpan != null) _InfoChip(Icons.calendar_today_outlined, artist.lifeSpan!),
+                      ],
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ),
+
+          if (topTracks.isNotEmpty)
+            SliverToBoxAdapter(child: _buildTopTracksSection(context, topTracks)),
+
+          if (albumsAsync.isLoading && allReleases.isEmpty)
+            const SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: CircularProgressIndicator()),
+              ),
+            )
+          else ...[
+            if (studio.isNotEmpty) _buildSection(context, title: 'Albums', releases: studio, maxItems: 6),
+            if (singles.isNotEmpty) _buildSection(context, title: 'Singles & EPs', releases: singles, maxItems: 6),
+            if (live.isNotEmpty) _buildSection(context, title: 'Live Albums', releases: live, maxItems: 6),
+            if (comps.isNotEmpty) _buildSection(context, title: 'Compilations', releases: comps, maxItems: 6),
+            if (allReleases.isEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    children: [
+                      Text('No discography cached yet.', style: theme.textTheme.bodyMedium),
+                      const SizedBox(height: 12),
+                      ElevatedButton.icon(
+                        onPressed: _syncing ? null : _forceRefreshDiscography,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Fetch Discography'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+
+          const SliverToBoxAdapter(child: SizedBox(height: 32)),
+        ],
+      ),
     );
   }
 
-  // ---- UI widgets unchanged from your version ----
-
-  Widget _buildTopTracksSection(BuildContext context) {
+  Widget _buildTopTracksSection(BuildContext context, List<DeezerTrack> topTracks) {
     final theme = Theme.of(context);
 
     return Column(
@@ -431,8 +312,8 @@ Future<void> _refreshDiscographyIfNeeded() async {
             style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
           ),
         ),
-        ...List.generate(_topTracks.length, (index) {
-          final track = _topTracks[index];
+        ...List.generate(topTracks.length, (index) {
+          final track = topTracks[index];
           return Material(
             color: Colors.transparent,
             child: InkWell(
@@ -568,12 +449,19 @@ Future<void> _refreshDiscographyIfNeeded() async {
               itemCount: displayItems.length,
               itemBuilder: (context, index) {
                 final album = displayItems[index];
+
+                final albumId = (album['id'] as String?) ?? '';
+                final title = (album['title'] as String?) ?? 'Unknown';
+                final year = album['firstReleaseDate'] as String?;
+                final coverUrl = (album['coverUrl'] as String?)?.trim();
+
                 return Padding(
                   padding: EdgeInsets.only(right: index < displayItems.length - 1 ? 10 : 0),
                   child: _HorizontalAlbumCard(
-                    albumId: album['id'] as String,
-                    title: album['title'] as String? ?? 'Unknown',
-                    year: album['firstReleaseDate'] as String?,
+                    albumId: albumId,
+                    title: title,
+                    year: year,
+                    coverUrl: coverUrl,
                   ),
                 );
               },
@@ -584,9 +472,9 @@ Future<void> _refreshDiscographyIfNeeded() async {
     );
   }
 
-  Widget _buildHeroImage(ThemeData theme) {
-    final bgUrl = _artistImages?.artistBackground;
-    final thumbUrl = _artistImages?.artistThumb;
+  Widget _buildHeroImage(ThemeData theme, ArtistImages? images) {
+    final bgUrl = images?.artistBackground;
+    final thumbUrl = images?.artistThumb;
     final imageUrl = bgUrl ?? thumbUrl;
 
     if (imageUrl != null) {
@@ -642,16 +530,20 @@ class _HorizontalAlbumCard extends StatelessWidget {
     required this.albumId,
     required this.title,
     this.year,
+    this.coverUrl,
   });
 
   final String albumId;
   final String title;
   final String? year;
+  final String? coverUrl;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final coverUrl = 'https://coverartarchive.org/release-group/$albumId/front-250';
+
+    final fallback = 'https://coverartarchive.org/release-group/$albumId/front-250';
+    final imageUrl = (coverUrl != null && coverUrl!.isNotEmpty) ? coverUrl! : fallback;
 
     return GestureDetector(
       onTap: () {
@@ -665,7 +557,7 @@ class _HorizontalAlbumCard extends StatelessWidget {
             ClipRRect(
               borderRadius: BorderRadius.circular(6),
               child: CachedNetworkImage(
-                imageUrl: coverUrl,
+                imageUrl: imageUrl,
                 width: 100,
                 height: 100,
                 fit: BoxFit.cover,
@@ -729,6 +621,7 @@ class _InfoChip extends StatelessWidget {
   }
 }
 
+/// ✅ Put back in this file so your existing usage compiles.
 class FavoriteArtistButton extends StatelessWidget {
   const FavoriteArtistButton({
     super.key,
@@ -765,10 +658,7 @@ class FavoriteArtistButton extends StatelessWidget {
 
         return IconButton(
           tooltip: isFav ? 'Unfavorite' : 'Favorite',
-          icon: Icon(
-            isFav ? Icons.favorite : Icons.favorite_border,
-            color: Colors.white,
-          ),
+          icon: Icon(isFav ? Icons.favorite : Icons.favorite_border, color: Colors.white),
           onPressed: () async {
             if (isFav) {
               await favRef.delete();
@@ -789,7 +679,7 @@ class FavoriteArtistButton extends StatelessWidget {
   }
 }
 
-
+/// ✅ Put back in this file so your existing usage compiles.
 class ArtistDiscographyPage extends StatelessWidget {
   const ArtistDiscographyPage({
     super.key,
@@ -827,10 +717,14 @@ class ArtistDiscographyPage extends StatelessWidget {
         itemCount: releases.length,
         itemBuilder: (context, index) {
           final album = releases[index];
-          final id = album['id'] as String;
-          final title = album['title'] as String? ?? 'Unknown';
+          final id = (album['id'] as String?) ?? '';
+          final title = (album['title'] as String?) ?? 'Unknown';
           final year = album['firstReleaseDate'] as String?;
-          final coverUrl = 'https://coverartarchive.org/release-group/$id/front-250';
+
+          final fallback = 'https://coverartarchive.org/release-group/$id/front-250';
+          final coverUrl = ((album['coverUrl'] as String?)?.trim().isNotEmpty == true)
+              ? (album['coverUrl'] as String).trim()
+              : fallback;
 
           return GestureDetector(
             onTap: () {
