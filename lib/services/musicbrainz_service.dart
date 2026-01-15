@@ -1,6 +1,7 @@
-import 'dart:convert';
-import 'package:http/http.dart' as http;
 import 'dart:async';
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
 
 /// Minimal album-ish result from MusicBrainz Release Group search.
 class MbReleaseGroup {
@@ -49,6 +50,7 @@ class MbArtist {
     required this.name,
     this.type,
     this.country,
+    this.disambiguation, // ✅ NEW (fixes your provider error)
     this.beginArea,
     this.beginDate,
     this.endDate,
@@ -58,6 +60,7 @@ class MbArtist {
   final String name;
   final String? type;
   final String? country;
+  final String? disambiguation; // ✅ NEW
   final String? beginArea;
   final String? beginDate;
   final String? endDate;
@@ -79,9 +82,13 @@ class MusicBrainzService {
   final http.Client _client;
   final String appUserAgent;
 
+  // ---------------------------
+  // Search
+  // ---------------------------
+
   Future<List<MbReleaseGroup>> searchReleaseGroups(String query) async {
     final q = query.trim();
-    if (q.isEmpty) return [];
+    if (q.isEmpty) return const [];
 
     final lucene = Uri.encodeQueryComponent(q);
     final url = Uri.parse(
@@ -104,26 +111,27 @@ class MusicBrainzService {
     }
 
     final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
-    final list = (decoded['release-groups'] as List<dynamic>? ?? []);
+    final list = (decoded['release-groups'] as List<dynamic>? ?? const []);
 
     final results = list.map((raw) {
       final m = raw as Map<String, dynamic>;
-      final title = (m['title'] as String?) ?? '';
-      final id = (m['id'] as String?) ?? '';
+      final title = (m['title'] as String?)?.trim() ?? '';
+      final id = (m['id'] as String?)?.trim() ?? '';
       final score = m['score'] as int?;
 
       String artistName = '';
       String? artistId;
+
       final artistCredit = m['artist-credit'];
       if (artistCredit is List && artistCredit.isNotEmpty) {
         final first = artistCredit.first;
         if (first is Map) {
           if (first['name'] is String) {
-            artistName = first['name'] as String;
+            artistName = (first['name'] as String).trim();
           }
           final artistObj = first['artist'];
           if (artistObj is Map && artistObj['id'] is String) {
-            artistId = artistObj['id'] as String;
+            artistId = (artistObj['id'] as String).trim();
           }
         }
       }
@@ -131,7 +139,7 @@ class MusicBrainzService {
       return MbReleaseGroup(
         id: id,
         title: title,
-        primaryArtistId: artistId,
+        primaryArtistId: (artistId?.isEmpty == true) ? null : artistId,
         primaryArtistName: artistName,
         firstReleaseDate: m['first-release-date'] as String?,
         primaryType: m['primary-type'] as String?,
@@ -148,7 +156,7 @@ class MusicBrainzService {
   /// Search for artists
   Future<List<MbArtistSearchResult>> searchArtists(String query) async {
     final q = query.trim();
-    if (q.isEmpty) return [];
+    if (q.isEmpty) return const [];
 
     final lucene = Uri.encodeQueryComponent(q);
     final url = Uri.parse(
@@ -171,17 +179,20 @@ class MusicBrainzService {
     }
 
     final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
-    final list = (decoded['artists'] as List<dynamic>? ?? []);
+    final list = (decoded['artists'] as List<dynamic>? ?? const []);
 
     final results = list.map((raw) {
       final m = raw as Map<String, dynamic>;
+      final id = (m['id'] as String?)?.trim() ?? '';
+      final name = (m['name'] as String?)?.trim() ?? '';
+
       return MbArtistSearchResult(
-        id: (m['id'] as String?) ?? '',
-        name: (m['name'] as String?) ?? '',
+        id: id,
+        name: name,
         type: m['type'] as String?,
         country: m['country'] as String?,
         score: m['score'] as int?,
-        disambiguation: m['disambiguation'] as String?,
+        disambiguation: (m['disambiguation'] as String?)?.trim(),
       );
     }).where((r) => r.id.isNotEmpty && r.name.isNotEmpty).toList();
 
@@ -191,13 +202,16 @@ class MusicBrainzService {
     return results;
   }
 
+  // ---------------------------
+  // Artist details + discography
+  // ---------------------------
+
   /// Fetch artist details by MBID
   static Future<MbArtist?> fetchArtistDetails(String artistId) async {
-    if (artistId.isEmpty) return null;
+    final id = artistId.trim();
+    if (id.isEmpty) return null;
 
-    final url = Uri.parse(
-      'https://musicbrainz.org/ws/2/artist/$artistId?fmt=json',
-    );
+    final url = Uri.parse('https://musicbrainz.org/ws/2/artist/$id?fmt=json');
 
     final resp = await http.get(url, headers: {
       'User-Agent': 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
@@ -211,21 +225,23 @@ class MusicBrainzService {
     final beginArea = data['begin-area'] as Map<String, dynamic>?;
 
     return MbArtist(
-      id: data['id'] as String,
-      name: data['name'] as String? ?? '',
-      type: data['type'] as String?,
-      country: data['country'] as String?,
-      beginArea: beginArea?['name'] as String?,
-      beginDate: lifeSpan?['begin'] as String?,
-      endDate: lifeSpan?['end'] as String?,
+      id: (data['id'] as String?)?.trim() ?? id,
+      name: (data['name'] as String?)?.trim() ?? '',
+      type: (data['type'] as String?)?.trim(),
+      country: (data['country'] as String?)?.trim(),
+      disambiguation: (data['disambiguation'] as String?)?.trim(), // ✅ NEW
+      beginArea: (beginArea?['name'] as String?)?.trim(),
+      beginDate: (lifeSpan?['begin'] as String?)?.trim(),
+      endDate: (lifeSpan?['end'] as String?)?.trim(),
     );
   }
 
   static Future<List<Map<String, dynamic>>> fetchArtistReleaseGroups(String artistId) async {
-    if (artistId.isEmpty) return [];
+    final id = artistId.trim();
+    if (id.isEmpty) return const [];
 
     final url = Uri.parse(
-      'https://musicbrainz.org/ws/2/release-group?artist=$artistId&type=album|ep|single&fmt=json&limit=100',
+      'https://musicbrainz.org/ws/2/release-group?artist=$id&type=album|ep|single&fmt=json&limit=100',
     );
 
     final resp = await http.get(url, headers: {
@@ -233,31 +249,31 @@ class MusicBrainzService {
       'Accept': 'application/json',
     });
 
-    if (resp.statusCode != 200) return [];
+    if (resp.statusCode != 200) return const [];
 
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
-    final groups = data['release-groups'] as List<dynamic>? ?? [];
+    final groups = data['release-groups'] as List<dynamic>? ?? const [];
 
     return groups.map((g) {
       final m = g as Map<String, dynamic>;
-      return {
-        'id': m['id'] as String? ?? '',
-        'title': m['title'] as String? ?? '',
+      return <String, dynamic>{
+        'id': (m['id'] as String?)?.trim() ?? '',
+        'title': (m['title'] as String?)?.trim() ?? '',
         'primaryType': m['primary-type'] as String?,
         'secondaryTypes': m['secondary-types'] as List?,
         'firstReleaseDate': m['first-release-date'] as String?,
       };
-    }).where((m) => (m['id'] as String).isNotEmpty).toList();
+    }).where((m) => (m['id'] as String).isNotEmpty).toList(growable: false);
   }
-    // ---------------------------
+
+  // ---------------------------
   // Tracklist helpers
   // ---------------------------
 
   static const String _mbBase = 'https://musicbrainz.org/ws/2';
 
   static Map<String, String> _mbHeaders({String? userAgent}) => {
-        'User-Agent': userAgent ??
-            'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
+        'User-Agent': userAgent ?? 'MusicAllApp/0.1 (contact: quentincoxmusic@gmail.com)',
         'Accept': 'application/json',
       };
 
@@ -301,11 +317,10 @@ class MusicBrainzService {
     String releaseGroupId, {
     String? userAgent,
   }) async {
-    if (releaseGroupId.isEmpty) return [];
+    final id = releaseGroupId.trim();
+    if (id.isEmpty) return const [];
 
-    final url = Uri.parse(
-      '$_mbBase/release-group/$releaseGroupId?fmt=json&inc=releases',
-    );
+    final url = Uri.parse('$_mbBase/release-group/$id?fmt=json&inc=releases');
 
     final resp = await http.get(url, headers: _mbHeaders(userAgent: userAgent));
 
@@ -318,10 +333,11 @@ class MusicBrainzService {
 
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     final releases = (data['releases'] as List?) ?? const [];
+
     return releases
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
-        .toList();
+        .toList(growable: false);
   }
 
   /// Fetch a release with recordings and return normalized tracks
@@ -331,11 +347,10 @@ class MusicBrainzService {
     String releaseId, {
     String? userAgent,
   }) async {
-    if (releaseId.isEmpty) return [];
+    final id = releaseId.trim();
+    if (id.isEmpty) return const [];
 
-    final url = Uri.parse(
-      '$_mbBase/release/$releaseId?fmt=json&inc=recordings',
-    );
+    final url = Uri.parse('$_mbBase/release/$id?fmt=json&inc=recordings');
 
     final resp = await http.get(url, headers: _mbHeaders(userAgent: userAgent));
 
@@ -365,17 +380,16 @@ class MusicBrainzService {
         final lengthMs = (t['length'] as num?)?.toInt();
 
         final rec = t['recording'];
-        final recordingId = rec is Map ? rec['id'] as String? : null;
+        final recordingId = rec is Map ? (rec['id'] as String?)?.trim() : null;
 
-        final durationSeconds =
-            lengthMs == null ? null : (lengthMs / 1000.0).round();
+        final durationSeconds = lengthMs == null ? null : (lengthMs / 1000.0).round();
 
         tracksOut.add({
           'title': (title != null && title.isNotEmpty) ? title : 'Untitled track',
           'disc': discNum,
           'position': pos,
           if (durationSeconds != null) 'durationSeconds': durationSeconds,
-          if (recordingId != null) 'recordingId': recordingId,
+          if (recordingId != null && recordingId.isNotEmpty) 'recordingId': recordingId,
         });
       }
     }
@@ -393,8 +407,7 @@ class MusicBrainzService {
   }
 
   /// Convenience: release-group -> choose release -> fetch tracklist
-  static Future<({String releaseId, List<Map<String, dynamic>> tracks})>
-      fetchTracklistForReleaseGroup(
+  static Future<({String releaseId, List<Map<String, dynamic>> tracks})> fetchTracklistForReleaseGroup(
     String releaseGroupId, {
     String? userAgent,
   }) async {
@@ -411,7 +424,7 @@ class MusicBrainzService {
       throw Exception('No releases found for release-group $releaseGroupId');
     }
 
-    final releaseId = best['id'] as String?;
+    final releaseId = (best['id'] as String?)?.trim();
     if (releaseId == null || releaseId.isEmpty) {
       throw Exception('Could not determine release id for $releaseGroupId');
     }

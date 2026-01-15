@@ -335,6 +335,48 @@ class _AlbumDetailPageState extends ConsumerState<AlbumDetailPage> {
     );
   }
 
+  Widget _buildTrackRow({
+    required ThemeData theme,
+    required int trackNum,
+    required String title,
+    required String durationLabel,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 24,
+            child: Text(
+              trackNum.toString(),
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Text(
+              title,
+              style: theme.textTheme.titleMedium?.copyWith(fontSize: 16),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 16),
+          if (durationLabel.isNotEmpty)
+            Text(
+              durationLabel,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -464,6 +506,8 @@ class _AlbumDetailPageState extends ConsumerState<AlbumDetailPage> {
                               ? CachedNetworkImage(
                                   imageUrl: coverUrl,
                                   fit: BoxFit.cover,
+                                  memCacheHeight: 440,
+                                  memCacheWidth: 440,
                                   placeholder: (_, _) => _AlbumArtPlaceholder(title: title),
                                   errorWidget: (_, _, _) => _AlbumArtPlaceholder(title: title),
                                 )
@@ -636,16 +680,88 @@ class _AlbumDetailPageState extends ConsumerState<AlbumDetailPage> {
                     );
                   }
 
-                  final hasMultipleDiscs = docs.any((d) {
-                    final disc = d.data()['disc'];
-                    return disc is num && disc > 1;
-                  });
+                  // Normalize + sort (disc asc, position asc) just to be safe.
+                  final sortedDocs = docs.toList()
+                    ..sort((a, b) {
+                      final da = (a.data()['disc'] as num?)?.toInt() ?? 1;
+                      final db = (b.data()['disc'] as num?)?.toInt() ?? 1;
+                      if (da != db) return da.compareTo(db);
+                      final pa = (a.data()['position'] as num?)?.toInt() ?? 0;
+                      final pb = (b.data()['position'] as num?)?.toInt() ?? 0;
+                      return pa.compareTo(pb);
+                    });
 
-                  return Column(
-                    children: docs.map((d) {
+                  final discNums = <int>{};
+                  for (final d in sortedDocs) {
+                    final disc = (d.data()['disc'] as num?)?.toInt() ?? 1;
+                    discNums.add(disc);
+                  }
+                  final discList = discNums.toList()..sort();
+                  final hasMultipleDiscs = discList.length > 1;
+
+                  // Single-disc: keep it simple (no headers).
+                  if (!hasMultipleDiscs) {
+                    return Column(
+                      children: sortedDocs.map((d) {
+                        final data = d.data();
+                        final trackNum = (data['position'] as num?)?.toInt() ?? 0;
+
+                        final tTitle =
+                            (data['title'] as String?)?.trim().isNotEmpty == true
+                                ? (data['title'] as String).trim()
+                                : 'Untitled track';
+
+                        final durNum = data['durationSeconds'] as num?;
+                        String durationLabel = '';
+                        if (durNum != null) {
+                          final totalSeconds = durNum.round();
+                          final minutes = totalSeconds ~/ 60;
+                          final seconds = totalSeconds % 60;
+                          durationLabel = '$minutes:${seconds.toString().padLeft(2, '0')}';
+                        }
+
+                        return _buildTrackRow(
+                          theme: theme,
+                          trackNum: trackNum,
+                          title: tTitle,
+                          durationLabel: durationLabel,
+                        );
+                      }).toList(),
+                    );
+                  }
+
+                  // Multi-disc: group with headers + faint separators.
+                  final byDisc = <int, List<QueryDocumentSnapshot<Map<String, dynamic>>>>{};
+                  for (final d in sortedDocs) {
+                    final disc = (d.data()['disc'] as num?)?.toInt() ?? 1;
+                    (byDisc[disc] ??= <QueryDocumentSnapshot<Map<String, dynamic>>>[]).add(d);
+                  }
+
+                  final children = <Widget>[];
+                  for (int i = 0; i < discList.length; i++) {
+                    final disc = discList[i];
+
+                    if (i > 0) {
+                      children.add(const SizedBox(height: 6));
+                      children.add(
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Divider(
+                            height: 18,
+                            thickness: 1,
+                            color: theme.dividerColor.withValues(alpha: 0.35),
+                          ),
+                        ),
+                      );
+                      children.add(const SizedBox(height: 6));
+                    }
+
+                    children.add(_DiscHeader(discNumber: disc));
+
+                    final discDocs = byDisc[disc] ?? const [];
+                    for (final d in discDocs) {
                       final data = d.data();
                       final trackNum = (data['position'] as num?)?.toInt() ?? 0;
-                      final disc = (data['disc'] as num?)?.toInt() ?? 1;
 
                       final tTitle =
                           (data['title'] as String?)?.trim().isNotEmpty == true
@@ -661,56 +777,18 @@ class _AlbumDetailPageState extends ConsumerState<AlbumDetailPage> {
                         durationLabel = '$minutes:${seconds.toString().padLeft(2, '0')}';
                       }
 
-                      final discPrefix = hasMultipleDiscs ? 'Disc $disc ' : '';
-
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            SizedBox(
-                              width: 24,
-                              child: Text(
-                                trackNum.toString(),
-                                textAlign: TextAlign.center,
-                                style: theme.textTheme.bodyMedium?.copyWith(
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    tTitle,
-                                    style: theme.textTheme.titleMedium?.copyWith(fontSize: 16),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  if (discPrefix.isNotEmpty)
-                                    Text(
-                                      discPrefix,
-                                      style: theme.textTheme.bodySmall?.copyWith(
-                                        color: theme.colorScheme.outline,
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            if (durationLabel.isNotEmpty)
-                              Text(
-                                durationLabel,
-                                style: theme.textTheme.bodyMedium?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                          ],
+                      children.add(
+                        _buildTrackRow(
+                          theme: theme,
+                          trackNum: trackNum,
+                          title: tTitle,
+                          durationLabel: durationLabel,
                         ),
                       );
-                    }).toList(),
-                  );
+                    }
+                  }
+
+                  return Column(children: children);
                 },
               ),
 
@@ -726,6 +804,29 @@ class _AlbumDetailPageState extends ConsumerState<AlbumDetailPage> {
           ),
         );
       },
+    );
+  }
+}
+
+class _DiscHeader extends StatelessWidget {
+  const _DiscHeader({required this.discNumber});
+
+  final int discNumber;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 2),
+      child: Text(
+        'Disc $discNumber',
+        style: theme.textTheme.labelLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+          color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.85),
+          letterSpacing: 0.2,
+        ),
+      ),
     );
   }
 }
@@ -845,7 +946,8 @@ class _YourReviewSection extends ConsumerWidget {
                     ),
                     const SizedBox(height: 6),
                     if (text.trim().isNotEmpty) Text(text),
-                    if (text.trim().isEmpty) Text('(No written review)', style: theme.textTheme.bodySmall),
+                    if (text.trim().isEmpty)
+                      Text('(No written review)', style: theme.textTheme.bodySmall),
                   ] else
                     Text(
                       'You have not rated this album yet.',
@@ -1013,7 +1115,8 @@ class _CommunityReviewsSection extends ConsumerWidget {
                               const SizedBox(width: 8),
                               Text(
                                 '${rating.toStringAsFixed(1)}/10',
-                                style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                                style: theme.textTheme.bodyMedium
+                                    ?.copyWith(fontWeight: FontWeight.w600),
                               ),
                             ],
                           ),
@@ -1055,7 +1158,8 @@ class _CommunityReviewsSection extends ConsumerWidget {
                               const SizedBox(width: 8),
                               Text(
                                 '${rating.toStringAsFixed(1)}/10',
-                                style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                                style: theme.textTheme.bodyMedium
+                                    ?.copyWith(fontWeight: FontWeight.w600),
                               ),
                             ],
                           ),
@@ -1122,7 +1226,7 @@ String? formatReleaseDate(String? iso) {
 
   try {
     final dt = DateTime.parse(trimmed);
-    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     final m = monthNames[dt.month - 1];
     return '$m ${dt.day}, ${dt.year}';
   } catch (_) {}
@@ -1131,7 +1235,7 @@ String? formatReleaseDate(String? iso) {
   if (parts.length == 1) {
     return parts[0];
   } else if (parts.length == 2) {
-    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     final year = parts[0];
     final monthIndex = int.tryParse(parts[1]) ?? 1;
     final m = monthNames[(monthIndex - 1).clamp(0, 11)];

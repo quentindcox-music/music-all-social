@@ -1,3 +1,5 @@
+// lib/providers/favorites_controller.dart
+
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -101,7 +103,9 @@ final favoriteArtistBusyProvider = Provider.family<bool, String>((ref, artistId)
 
 class FavoriteArtistController extends AutoDisposeFamilyAsyncNotifier<void, String> {
   @override
-  FutureOr<void> build(String artistId) {}
+  FutureOr<void> build(String artistId) {
+    // no-op; we just use this controller for actions
+  }
 
   Future<void> toggle({
     required bool isCurrentlyFav,
@@ -125,10 +129,22 @@ class FavoriteArtistController extends AutoDisposeFamilyAsyncNotifier<void, Stri
         return;
       }
 
+      final img = payload.imageUrl.trim();
+
+      // Write BOTH legacy + new keys so older UI code never breaks.
       await favRef.set({
         'artistId': payload.artistId,
+
+        // keep both so any existing code works
         'name': payload.artistName,
-        'imageUrl': payload.imageUrl.trim(),
+        'artistName': payload.artistName,
+
+        // keep both so any existing code works
+        if (img.isNotEmpty) ...{
+          'imageUrl': img,
+          'thumbUrl': img,
+        },
+
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));

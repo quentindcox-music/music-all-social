@@ -43,7 +43,15 @@ class _DiscoverPageState extends State<DiscoverPage> {
   List<MbArtistSearchResult> _artistResults = const [];
   Map<String, int> _listenerCounts = {};
 
-  // --------- NEW: memoized artist avatar URLs (Fanart -> Last.fm) ----------
+  // ✅ Track duplicate names in current artist results (lowercased)
+  Set<String> _duplicateArtistNamesLower = <String>{};
+
+  bool _isDuplicateArtistName(String name) {
+    final key = name.trim().toLowerCase();
+    return _duplicateArtistNamesLower.contains(key);
+  }
+
+  // --------- memoized artist avatar URLs (Fanart -> Last.fm) ----------
   final Map<String, Future<String?>> _artistAvatarFutureById = {};
   final Map<String, String?> _artistAvatarUrlById = {};
 
@@ -59,8 +67,10 @@ class _DiscoverPageState extends State<DiscoverPage> {
     final existing = _artistAvatarFutureById[id];
     if (existing != null) return existing;
 
+    final allowNameFallback = !_isDuplicateArtistName(artist.name);
+
     final fut = () async {
-      // 1) Fanart (best quality)
+      // 1) Fanart (best quality when present)
       try {
         final images = await FanartService.getArtistImages(id);
         final url = (images?.artistThumb ?? images?.artistBackground)?.trim();
@@ -72,9 +82,15 @@ class _DiscoverPageState extends State<DiscoverPage> {
         // ignore and fall back
       }
 
-      // 2) Last.fm (better coverage)
+      // 2) Last.fm (MBID-first; name fallback disabled for duplicates)
       try {
-        final url = (await _lastFmService.getArtistImageUrl(artist.name))?.trim();
+        final url = (await _lastFmService.getArtistImageUrl(
+          artist.name,
+          mbid: id,
+          allowNameFallback: allowNameFallback,
+        ))
+            ?.trim();
+
         if (url != null && url.isNotEmpty) {
           _artistAvatarUrlById[id] = url;
           return url;
@@ -127,8 +143,10 @@ class _DiscoverPageState extends State<DiscoverPage> {
         _albumResults = const [];
         _artistResults = const [];
         _listenerCounts = {};
+        _duplicateArtistNamesLower = <String>{};
         _error = null;
         _loading = false;
+        _loadingPopularity = false;
       });
       return;
     }
@@ -137,6 +155,11 @@ class _DiscoverPageState extends State<DiscoverPage> {
       _loading = true;
       _error = null;
       _listenerCounts = {};
+      _loadingPopularity = false;
+      // don’t wipe duplicates until we know the new result set
+      if (_searchMode == SearchMode.artists) {
+        _duplicateArtistNamesLower = <String>{};
+      }
     });
 
     try {
@@ -148,17 +171,29 @@ class _DiscoverPageState extends State<DiscoverPage> {
           _loading = false;
         });
 
+        // ignore: discarded_futures
         _fetchAlbumPopularity(res);
       } else {
         _clearArtistAvatarCacheForNewSearch();
 
         final res = await _mbService.searchArtists(query);
         if (!mounted) return;
+
+        // ✅ compute duplicate names in this result set
+        final counts = <String, int>{};
+        for (final a in res) {
+          final key = a.name.trim().toLowerCase();
+          counts[key] = (counts[key] ?? 0) + 1;
+        }
+        final dupes = counts.entries.where((e) => e.value > 1).map((e) => e.key).toSet();
+
         setState(() {
           _artistResults = res;
+          _duplicateArtistNamesLower = dupes;
           _loading = false;
         });
 
+        // ignore: discarded_futures
         _fetchArtistPopularity(res);
       }
     } catch (e) {
@@ -175,6 +210,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
       setState(() {
         _error = message;
         _loading = false;
+        _loadingPopularity = false;
       });
     }
   }
@@ -217,6 +253,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
     try {
       final artistList = artists.map((a) => (name: a.name, id: a.id)).toList();
 
+      // ✅ LastFmService handles duplicates safely (MBID-first; no name fallback for duplicates)
       final counts = await _lastFmService.getArtistListenerCounts(artistList);
 
       if (!mounted) return;
@@ -244,13 +281,19 @@ class _DiscoverPageState extends State<DiscoverPage> {
       _albumResults = const [];
       _artistResults = const [];
       _listenerCounts = {};
+      _duplicateArtistNamesLower = <String>{};
+      _loadingPopularity = false;
     });
     if (_controller.text.trim().isNotEmpty) {
+      // ignore: discarded_futures
       _search(_controller.text);
     }
   }
 
-  String _formatListeners(int count) {
+  String _formatListeners(
+    int count, {
+    bool showDashWhenZero = false,
+  }) {
     if (count >= 1000000) {
       return '${(count / 1000000).toStringAsFixed(1)}M listeners';
     } else if (count >= 1000) {
@@ -258,7 +301,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
     } else if (count > 0) {
       return '$count listeners';
     }
-    return '';
+    return showDashWhenZero ? '— listeners' : '';
   }
 
   Future<void> _onAlbumTap(MbReleaseGroup rg) async {
@@ -317,9 +360,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
               onChanged: _onQueryChanged,
               textInputAction: TextInputAction.search,
               decoration: InputDecoration(
-                labelText: _searchMode == SearchMode.albums
-                    ? 'Search albums'
-                    : 'Search artists',
+                labelText: _searchMode == SearchMode.albums ? 'Search albums' : 'Search artists',
                 hintText: _searchMode == SearchMode.albums
                     ? 'Try "Animals" or "Dark Side of the Moon"'
                     : 'Try "Pink Floyd" or "Radiohead"',
@@ -332,6 +373,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
                     : IconButton(
                         onPressed: () {
                           _controller.clear();
+                          // ignore: discarded_futures
                           _search('');
                           setState(() {});
                         },
@@ -394,9 +436,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
               ),
             ),
           Expanded(
-            child: _searchMode == SearchMode.albums
-                ? _buildAlbumResults(theme)
-                : _buildArtistResults(theme),
+            child: _searchMode == SearchMode.albums ? _buildAlbumResults(theme) : _buildArtistResults(theme),
           ),
         ],
       ),
@@ -426,14 +466,8 @@ class _DiscoverPageState extends State<DiscoverPage> {
         }
 
         return ListTile(
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 8,
-          ),
-          leading: AlbumThumb(
-            releaseId: r.id,
-            size: 56,
-          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          leading: AlbumThumb(releaseId: r.id, size: 56),
           title: Text(
             r.title,
             maxLines: 1,
@@ -453,17 +487,10 @@ class _DiscoverPageState extends State<DiscoverPage> {
                   if (subtitleParts.isNotEmpty)
                     Text(
                       subtitleParts.join(' • '),
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.outline,
-                      ),
+                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
                     ),
                   if (subtitleParts.isNotEmpty && listenersText.isNotEmpty)
-                    Text(
-                      ' • ',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.outline,
-                      ),
-                    ),
+                    Text(' • ', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline)),
                   if (listenersText.isNotEmpty)
                     Text(
                       listenersText,
@@ -493,8 +520,13 @@ class _DiscoverPageState extends State<DiscoverPage> {
       separatorBuilder: (_, _) => const Divider(height: 1),
       itemBuilder: (context, i) {
         final artist = _artistResults[i];
+
+        final isDup = _isDuplicateArtistName(artist.name);
+
         final listeners = _listenerCounts[artist.id] ?? 0;
-        final listenersText = _formatListeners(listeners);
+        final listenersText = _loadingPopularity
+            ? ''
+            : _formatListeners(listeners, showDashWhenZero: isDup);
 
         final subtitleParts = <String>[];
         if (artist.type != null && artist.type!.isNotEmpty) {
@@ -505,10 +537,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
         }
 
         return ListTile(
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 8,
-          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           leading: _ArtistAvatar(
             artist: artist,
             theme: theme,
@@ -529,17 +558,10 @@ class _DiscoverPageState extends State<DiscoverPage> {
                     if (subtitleParts.isNotEmpty)
                       Text(
                         subtitleParts.join(' • '),
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.outline,
-                        ),
+                        style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
                       ),
                     if (subtitleParts.isNotEmpty && listenersText.isNotEmpty)
-                      Text(
-                        ' • ',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.outline,
-                        ),
-                      ),
+                      Text(' • ', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline)),
                     if (listenersText.isNotEmpty)
                       Text(
                         listenersText,
@@ -550,8 +572,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
                       ),
                   ],
                 ),
-              if (artist.disambiguation != null &&
-                  artist.disambiguation!.isNotEmpty)
+              if (artist.disambiguation != null && artist.disambiguation!.isNotEmpty)
                 Text(
                   artist.disambiguation!,
                   maxLines: 1,
@@ -579,9 +600,7 @@ class _DiscoverPageState extends State<DiscoverPage> {
           ),
           const SizedBox(height: 16),
           Text(
-            _searchMode == SearchMode.albums
-                ? 'Search for an album'
-                : 'Search for an artist',
+            _searchMode == SearchMode.albums ? 'Search for an album' : 'Search for an artist',
             style: theme.textTheme.titleMedium?.copyWith(
               color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
             ),
@@ -612,8 +631,7 @@ class _ArtistAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final initial =
-        artist.name.trim().isNotEmpty ? artist.name.trim()[0].toUpperCase() : '?';
+    final initial = artist.name.trim().isNotEmpty ? artist.name.trim()[0].toUpperCase() : '?';
 
     return FutureBuilder<String?>(
       future: urlFuture,
@@ -682,9 +700,7 @@ class _ModeChip extends StatelessWidget {
         duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
-          color: selected
-              ? theme.colorScheme.primaryContainer
-              : theme.colorScheme.surfaceContainerHighest,
+          color: selected ? theme.colorScheme.primaryContainer : theme.colorScheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
@@ -693,18 +709,14 @@ class _ModeChip extends StatelessWidget {
             Icon(
               icon,
               size: 18,
-              color: selected
-                  ? theme.colorScheme.onPrimaryContainer
-                  : theme.colorScheme.onSurfaceVariant,
+              color: selected ? theme.colorScheme.onPrimaryContainer : theme.colorScheme.onSurfaceVariant,
             ),
             const SizedBox(width: 6),
             Text(
               label,
               style: TextStyle(
                 fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                color: selected
-                    ? theme.colorScheme.onPrimaryContainer
-                    : theme.colorScheme.onSurfaceVariant,
+                color: selected ? theme.colorScheme.onPrimaryContainer : theme.colorScheme.onSurfaceVariant,
               ),
             ),
           ],

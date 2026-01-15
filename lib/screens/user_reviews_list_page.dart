@@ -177,7 +177,7 @@ class UserReviewsListPage extends StatelessWidget {
                             children: [
                               Text('${rating.toStringAsFixed(1)}/10'),
                               const SizedBox(width: 8),
-                              buildStarRow(rating, size: 14),
+                              buildStarRow(context, rating, size: 14),
                             ],
                           ),
                         ],
@@ -216,19 +216,30 @@ class UserReviewsListPage extends StatelessWidget {
 
 /// Displays stars 1–10 with half-filled look based on rating.
 /// Example: rating 7.5 = ★★★★★★★½☆
-Widget buildStarRow(double rating, {double size = 16}) {
-  final fullStars = rating.floor();
-  final hasHalfStar = (rating - fullStars) >= 0.5;
+Widget buildStarRow(
+  BuildContext context,
+  double rating, {
+  double size = 16,
+}) {
+  final theme = Theme.of(context);
+
+  // Use your theme purple
+  final filledColor = theme.colorScheme.primary;
+  final emptyColor = theme.colorScheme.primary.withValues(alpha: 0.28);
+
+  // If rating is 0–10, we want 10 stars
+  final fullStars = rating.floor().clamp(0, 10);
+  final hasHalfStar = (rating - fullStars) >= 0.5 && fullStars < 10;
 
   return Row(
     mainAxisSize: MainAxisSize.min,
     children: List.generate(10, (i) {
       if (i < fullStars) {
-        return Icon(Icons.star, color: Colors.amber, size: size);
+        return Icon(Icons.star, color: filledColor, size: size);
       } else if (i == fullStars && hasHalfStar) {
-        return Icon(Icons.star_half, color: Colors.amber, size: size);
+        return Icon(Icons.star_half, color: filledColor, size: size);
       } else {
-        return Icon(Icons.star_border, color: Colors.amber, size: size);
+        return Icon(Icons.star_border, color: emptyColor, size: size);
       }
     }),
   );

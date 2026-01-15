@@ -1,17 +1,17 @@
 import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:music_all_app/providers/artist_providers.dart';
+import 'package:music_all_app/providers/favorites_controller.dart';
+import 'package:music_all_app/providers/favorites_providers.dart';
 import 'package:music_all_app/providers/firebase_providers.dart';
 import 'package:music_all_app/services/discography_cache_service.dart';
 import 'package:music_all_app/services/musicbrainz_service.dart';
-import 'package:music_all_app/services/deezer_service.dart'; // DeezerTrack
-import 'package:music_all_app/services/fanart_service.dart'; // ArtistImages
+import 'package:music_all_app/services/deezer_service.dart';
+import 'package:music_all_app/services/fanart_service.dart';
 
 import 'album_detail_page.dart';
 
@@ -37,18 +37,21 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
   late final DiscographyCacheService _cache;
   ProviderSubscription<AsyncValue<List<Map<String, dynamic>>>>? _albumsSub;
 
+  static const double _expandedHeight = 280;
+
   @override
   void initState() {
     super.initState();
 
     _cache = DiscographyCacheService(ref.read(firestoreProvider));
 
-    // Once the albums provider has a value, trigger background sync if needed.
+    // Once albums provider has real data (not loading/error), trigger background sync if needed.
     _albumsSub = ref.listenManual<AsyncValue<List<Map<String, dynamic>>>>(
       artistAlbumsProvider(widget.artistId),
       (prev, next) {
-        final albums = next.valueOrNull;
-        if (albums == null) return;
+        if (next.isLoading || next.hasError) return;
+        final albums = next.value ?? const <Map<String, dynamic>>[];
+        // ignore: discarded_futures
         _maybeRefreshDiscography(albums);
       },
     );
@@ -92,6 +95,8 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
   }
 
   Future<void> _forceRefreshDiscography() async {
+    if (_syncing) return;
+
     try {
       if (mounted) {
         setState(() {
@@ -114,59 +119,73 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
     }
   }
 
-  // --- Filtering / Sorting ---
-  List<Map<String, dynamic>> _sortByDateDescending(List<Map<String, dynamic>> albums) {
-    albums.sort((a, b) {
-      final dateA = a['firstReleaseDate'] as String? ?? '0000';
-      final dateB = b['firstReleaseDate'] as String? ?? '0000';
-      return dateB.compareTo(dateA);
-    });
-    return albums;
+  int _compareReleaseDateDesc(Map<String, dynamic> a, Map<String, dynamic> b) {
+    final dateA = (a['firstReleaseDate'] as String?) ?? '0000';
+    final dateB = (b['firstReleaseDate'] as String?) ?? '0000';
+    return dateB.compareTo(dateA);
   }
 
-  List<Map<String, dynamic>> _studioAlbums(List<Map<String, dynamic>> all) {
-    const excludeTypes = [
+  ({
+    List<Map<String, dynamic>> studio,
+    List<Map<String, dynamic>> singles,
+    List<Map<String, dynamic>> live,
+    List<Map<String, dynamic>> comps
+  }) _categorize(List<Map<String, dynamic>> all) {
+    const excludeTypes = {
       'Live',
       'Compilation',
       'Soundtrack',
       'Spokenword',
       'Interview',
       'DJ-mix',
-    ];
+    };
 
-    final albums = all.where((r) {
+    final studio = <Map<String, dynamic>>[];
+    final singles = <Map<String, dynamic>>[];
+    final live = <Map<String, dynamic>>[];
+    final comps = <Map<String, dynamic>>[];
+
+    for (final r in all) {
       final type = r['primaryType'] as String?;
-      final secondary = r['secondaryTypes'] as List?;
-      if (type != 'Album') return false;
-      if (secondary == null || secondary.isEmpty) return true;
-      return !secondary.any((s) => excludeTypes.contains(s));
-    }).toList();
+      final secondaryRaw = r['secondaryTypes'];
+      final secondary = (secondaryRaw is List)
+          ? secondaryRaw.map((e) => e.toString()).toList()
+          : const <String>[];
 
-    return _sortByDateDescending(albums);
+      final isLive = secondary.contains('Live');
+      final isComp = secondary.contains('Compilation');
+
+      if (isLive) live.add(r);
+      if (isComp) comps.add(r);
+
+      if (type == 'Single' || type == 'EP') {
+        singles.add(r);
+        continue;
+      }
+
+      if (type == 'Album') {
+        final isExcluded = secondary.any(excludeTypes.contains);
+        if (!isExcluded) studio.add(r);
+      }
+    }
+
+    studio.sort(_compareReleaseDateDesc);
+    singles.sort(_compareReleaseDateDesc);
+    live.sort(_compareReleaseDateDesc);
+    comps.sort(_compareReleaseDateDesc);
+
+    return (studio: studio, singles: singles, live: live, comps: comps);
   }
 
-  List<Map<String, dynamic>> _liveAlbums(List<Map<String, dynamic>> all) {
-    final albums = all.where((r) {
-      final secondary = r['secondaryTypes'] as List?;
-      return secondary != null && secondary.contains('Live');
-    }).toList();
-    return _sortByDateDescending(albums);
-  }
-
-  List<Map<String, dynamic>> _singlesEps(List<Map<String, dynamic>> all) {
-    final albums = all.where((r) {
-      final type = r['primaryType'] as String?;
-      return type == 'Single' || type == 'EP';
-    }).toList();
-    return _sortByDateDescending(albums);
-  }
-
-  List<Map<String, dynamic>> _compilations(List<Map<String, dynamic>> all) {
-    final albums = all.where((r) {
-      final secondary = r['secondaryTypes'] as List?;
-      return secondary != null && secondary.contains('Compilation');
-    }).toList();
-    return _sortByDateDescending(albums);
+  String _formatListeners(int count) {
+    if (count >= 1000000) {
+      return '${(count / 1000000).toStringAsFixed(1)}M listeners';
+    } else if (count >= 1000) {
+      return '${(count / 1000).toStringAsFixed(0)}K listeners';
+    } else if (count > 0) {
+      return '$count listeners';
+    }
+    return '';
   }
 
   @override
@@ -176,14 +195,12 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
     final headerAsync = ref.watch(
       artistHeaderProvider((artistId: widget.artistId, artistName: widget.artistName)),
     );
-
     final albumsAsync = ref.watch(artistAlbumsProvider(widget.artistId));
 
     final header = headerAsync.valueOrNull;
-    final allReleases = albumsAsync.valueOrNull ?? <Map<String, dynamic>>[];
+    final allReleases = albumsAsync.valueOrNull ?? const <Map<String, dynamic>>[];
 
     final showBlockingLoader = headerAsync.isLoading && albumsAsync.isLoading && _syncError == null;
-
     if (showBlockingLoader) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
@@ -192,20 +209,50 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
       return Scaffold(body: Center(child: Text('Error: $_syncError')));
     }
 
+    if (albumsAsync.hasError && allReleases.isEmpty) {
+      return Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Could not load discography.', style: theme.textTheme.titleMedium),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: () => ref.invalidate(artistAlbumsProvider(widget.artistId)),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     final artist = header?.artist;
     final images = header?.images;
     final topTracks = header?.topTracks ?? const <DeezerTrack>[];
 
-    final studio = _studioAlbums(allReleases);
-    final singles = _singlesEps(allReleases);
-    final live = _liveAlbums(allReleases);
-    final comps = _compilations(allReleases);
+    // ✅ NEW: best effort image (Fanart -> Last.fm -> Deezer)
+    final bestImageUrl = (header?.bestImageUrl ?? '').trim();
+    final listeners = header?.lastFmListeners ?? 0;
+    final listenersText = _formatListeners(listeners);
+
+    final sections = _categorize(List<Map<String, dynamic>>.unmodifiable(allReleases));
+
+    // Image decode cache sizing (px, not dp)
+    final size = MediaQuery.sizeOf(context);
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final heroCacheW = (size.width * dpr).round().clamp(200, 4096);
+    final heroCacheH = (_expandedHeight * dpr).round().clamp(200, 4096);
 
     return Scaffold(
       body: CustomScrollView(
         slivers: [
           SliverAppBar(
-            expandedHeight: 280,
+            expandedHeight: _expandedHeight,
             pinned: true,
             stretch: true,
             backgroundColor: theme.colorScheme.surface,
@@ -213,7 +260,10 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
               FavoriteArtistButton(
                 artistId: widget.artistId,
                 artistName: widget.artistName,
-                imageUrl: images?.artistThumb ?? images?.artistBackground,
+                // ✅ Store best image (not just Fanart)
+                imageUrl: bestImageUrl.isNotEmpty
+                    ? bestImageUrl
+                    : (images?.artistThumb ?? images?.artistBackground),
               ),
             ],
             flexibleSpace: FlexibleSpaceBar(
@@ -232,7 +282,13 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
                 ),
               ),
               titlePadding: const EdgeInsets.only(left: 16, bottom: 16),
-              background: _buildHeroImage(theme, images),
+              background: _buildHeroImage(
+                theme: theme,
+                images: images,
+                bestImageUrl: bestImageUrl,
+                memCacheWidth: heroCacheW,
+                memCacheHeight: heroCacheH,
+              ),
             ),
           ),
 
@@ -253,14 +309,16 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
                         if (artist.country != null) _InfoChip(Icons.location_on_outlined, artist.country!),
                         if (artist.beginArea != null) _InfoChip(Icons.home_outlined, artist.beginArea!),
                         if (artist.lifeSpan != null) _InfoChip(Icons.calendar_today_outlined, artist.lifeSpan!),
+                        // ✅ NEW: show listeners when available (helps disambiguate duplicates)
+                        if (listenersText.isNotEmpty) _InfoChip(Icons.headphones, listenersText),
                       ],
                     )
                   : const SizedBox.shrink(),
             ),
           ),
 
-          if (topTracks.isNotEmpty)
-            SliverToBoxAdapter(child: _buildTopTracksSection(context, topTracks)),
+          // ✅ Lazy top-tracks rendering (SliverList instead of Column)
+          if (topTracks.isNotEmpty) ..._buildTopTracksSlivers(context, topTracks),
 
           if (albumsAsync.isLoading && allReleases.isEmpty)
             const SliverToBoxAdapter(
@@ -270,10 +328,14 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
               ),
             )
           else ...[
-            if (studio.isNotEmpty) _buildSection(context, title: 'Albums', releases: studio, maxItems: 6),
-            if (singles.isNotEmpty) _buildSection(context, title: 'Singles & EPs', releases: singles, maxItems: 6),
-            if (live.isNotEmpty) _buildSection(context, title: 'Live Albums', releases: live, maxItems: 6),
-            if (comps.isNotEmpty) _buildSection(context, title: 'Compilations', releases: comps, maxItems: 6),
+            if (sections.studio.isNotEmpty)
+              _buildSection(context, title: 'Albums', releases: sections.studio, maxItems: 6),
+            if (sections.singles.isNotEmpty)
+              _buildSection(context, title: 'Singles & EPs', releases: sections.singles, maxItems: 6),
+            if (sections.live.isNotEmpty)
+              _buildSection(context, title: 'Live Albums', releases: sections.live, maxItems: 6),
+            if (sections.comps.isNotEmpty)
+              _buildSection(context, title: 'Compilations', releases: sections.comps, maxItems: 6),
             if (allReleases.isEmpty)
               SliverToBoxAdapter(
                 child: Padding(
@@ -299,92 +361,109 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
     );
   }
 
-  Widget _buildTopTracksSection(BuildContext context, List<DeezerTrack> topTracks) {
+  List<Widget> _buildTopTracksSlivers(BuildContext context, List<DeezerTrack> topTracks) {
     final theme = Theme.of(context);
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final artPx = (48 * dpr).round().clamp(48, 512);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
+    return [
+      SliverToBoxAdapter(
+        child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
           child: Text(
             'Top Songs',
             style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
           ),
         ),
-        ...List.generate(topTracks.length, (index) {
-          final track = topTracks[index];
-          return Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () {},
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 24,
-                      child: Text(
-                        '${index + 1}',
-                        style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.outline),
+      ),
+      SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            final track = topTracks[index];
+            final cover = track.albumCoverUrl?.trim();
+            final hasCover = cover != null && cover.isNotEmpty;
+
+            return Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () {},
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 24,
+                        child: Text(
+                          '${index + 1}',
+                          style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.outline),
+                        ),
                       ),
-                    ),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: track.albumCoverUrl != null
-                          ? Image.network(
-                              track.albumCoverUrl!,
-                              width: 48,
-                              height: 48,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, _, _) => Container(
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: hasCover
+                            ? CachedNetworkImage(
+                                imageUrl: cover,
+                                width: 48,
+                                height: 48,
+                                fit: BoxFit.cover,
+                                memCacheWidth: artPx,
+                                memCacheHeight: artPx,
+                                placeholder: (_, _) => Container(
+                                  width: 48,
+                                  height: 48,
+                                  color: Colors.grey[800],
+                                  child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                                ),
+                                errorWidget: (_, _, _) => Container(
+                                  width: 48,
+                                  height: 48,
+                                  color: Colors.grey[800],
+                                  child: const Icon(Icons.music_note, size: 24),
+                                ),
+                              )
+                            : Container(
                                 width: 48,
                                 height: 48,
                                 color: Colors.grey[800],
                                 child: const Icon(Icons.music_note, size: 24),
                               ),
-                            )
-                          : Container(
-                              width: 48,
-                              height: 48,
-                              color: Colors.grey[800],
-                              child: const Icon(Icons.music_note, size: 24),
-                            ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            track.title,
-                            style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w500),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          if (track.albumTitle != null)
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
                             Text(
-                              track.albumTitle!,
-                              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
+                              track.title,
+                              style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w500),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
-                        ],
+                            if ((track.albumTitle ?? '').trim().isNotEmpty)
+                              Text(
+                                track.albumTitle!.trim(),
+                                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                          ],
+                        ),
                       ),
-                    ),
-                    Text(
-                      track.formattedDuration,
-                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
-                    ),
-                  ],
+                      Text(
+                        track.formattedDuration,
+                        style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          );
-        }),
-        const SizedBox(height: 8),
-      ],
-    );
+            );
+          },
+          childCount: topTracks.length,
+        ),
+      ),
+      const SliverToBoxAdapter(child: SizedBox(height: 8)),
+    ];
   }
 
   Widget _buildSection(
@@ -395,7 +474,7 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
   }) {
     final theme = Theme.of(context);
     final showSeeAll = releases.length > maxItems;
-    final displayItems = releases.take(maxItems).toList();
+    final displayItems = releases.take(maxItems).toList(growable: false);
 
     return SliverToBoxAdapter(
       child: Column(
@@ -419,7 +498,7 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
                           builder: (_) => ArtistDiscographyPage(
                             artistName: widget.artistName,
                             sectionTitle: title,
-                            releases: releases,
+                            releases: List<Map<String, dynamic>>.unmodifiable(releases),
                           ),
                         ),
                       );
@@ -451,7 +530,7 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
                 final album = displayItems[index];
 
                 final albumId = (album['id'] as String?) ?? '';
-                final title = (album['title'] as String?) ?? 'Unknown';
+                final albumTitle = (album['title'] as String?) ?? 'Unknown';
                 final year = album['firstReleaseDate'] as String?;
                 final coverUrl = (album['coverUrl'] as String?)?.trim();
 
@@ -459,7 +538,7 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
                   padding: EdgeInsets.only(right: index < displayItems.length - 1 ? 10 : 0),
                   child: _HorizontalAlbumCard(
                     albumId: albumId,
-                    title: title,
+                    title: albumTitle,
                     year: year,
                     coverUrl: coverUrl,
                   ),
@@ -472,18 +551,32 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
     );
   }
 
-  Widget _buildHeroImage(ThemeData theme, ArtistImages? images) {
-    final bgUrl = images?.artistBackground;
-    final thumbUrl = images?.artistThumb;
-    final imageUrl = bgUrl ?? thumbUrl;
+  Widget _buildHeroImage({
+    required ThemeData theme,
+    required ArtistImages? images,
+    required String bestImageUrl,
+    required int memCacheWidth,
+    required int memCacheHeight,
+  }) {
+    // ✅ Prefer provider's bestImageUrl (Fanart -> Last.fm -> Deezer)
+    final preferred = bestImageUrl.trim();
+    // Fallback to any Fanart fields if provider didn't resolve one
+    final bgUrl = images?.artistBackground?.trim() ?? '';
+    final thumbUrl = images?.artistThumb?.trim() ?? '';
 
-    if (imageUrl != null) {
+    final imageUrl = preferred.isNotEmpty
+        ? preferred
+        : (bgUrl.isNotEmpty ? bgUrl : (thumbUrl.isNotEmpty ? thumbUrl : ''));
+
+    if (imageUrl.isNotEmpty) {
       return Stack(
         fit: StackFit.expand,
         children: [
           CachedNetworkImage(
             imageUrl: imageUrl,
             fit: BoxFit.cover,
+            memCacheWidth: memCacheWidth,
+            memCacheHeight: memCacheHeight,
             placeholder: (_, _) => Container(color: theme.colorScheme.primaryContainer),
             errorWidget: (_, _, _) => _buildPlaceholder(theme),
           ),
@@ -499,6 +592,7 @@ class _ArtistDetailPageState extends ConsumerState<ArtistDetailPage> {
         ],
       );
     }
+
     return _buildPlaceholder(theme);
   }
 
@@ -542,8 +636,11 @@ class _HorizontalAlbumCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final px = (100 * dpr).round().clamp(100, 512);
+
     final fallback = 'https://coverartarchive.org/release-group/$albumId/front-250';
-    final imageUrl = (coverUrl != null && coverUrl!.isNotEmpty) ? coverUrl! : fallback;
+    final imageUrl = (coverUrl != null && coverUrl!.trim().isNotEmpty) ? coverUrl!.trim() : fallback;
 
     return GestureDetector(
       onTap: () {
@@ -561,6 +658,8 @@ class _HorizontalAlbumCard extends StatelessWidget {
                 width: 100,
                 height: 100,
                 fit: BoxFit.cover,
+                memCacheWidth: px,
+                memCacheHeight: px,
                 placeholder: (_, _) => Container(
                   width: 100,
                   height: 100,
@@ -621,8 +720,8 @@ class _InfoChip extends StatelessWidget {
   }
 }
 
-/// ✅ Put back in this file so your existing usage compiles.
-class FavoriteArtistButton extends StatelessWidget {
+/// ✅ Riverpod favorite button (no StreamBuilder, no FirebaseAuth usage)
+class FavoriteArtistButton extends ConsumerWidget {
   const FavoriteArtistButton({
     super.key,
     required this.artistId,
@@ -635,8 +734,8 @@ class FavoriteArtistButton extends StatelessWidget {
   final String? imageUrl;
 
   @override
-  Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+  Widget build(BuildContext context, WidgetRef ref) {
+    final uid = ref.watch(uidProvider);
     if (uid.isEmpty) {
       return IconButton(
         onPressed: null,
@@ -645,41 +744,51 @@ class FavoriteArtistButton extends StatelessWidget {
       );
     }
 
-    final favRef = FirebaseFirestore.instance
-        .collection('users')
-        .doc(uid)
-        .collection('favorites_artists')
-        .doc(artistId);
+    final isFav = ref.watch(isFavoriteArtistProvider(artistId));
+    final busy = ref.watch(favoriteArtistBusyProvider(artistId));
 
-    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: favRef.snapshots(),
-      builder: (context, snap) {
-        final isFav = snap.data?.exists == true;
+    return IconButton(
+      tooltip: isFav ? 'Unfavorite' : 'Favorite',
+      onPressed: busy
+          ? null
+          : () async {
+              try {
+                await ref.read(favoriteArtistControllerProvider(artistId).notifier).toggle(
+                      isCurrentlyFav: isFav,
+                      payload: FavoriteArtistPayload(
+                        artistId: artistId,
+                        artistName: artistName,
+                        imageUrl: (imageUrl ?? '').trim(),
+                      ),
+                    );
 
-        return IconButton(
-          tooltip: isFav ? 'Unfavorite' : 'Favorite',
-          icon: Icon(isFav ? Icons.favorite : Icons.favorite_border, color: Colors.white),
-          onPressed: () async {
-            if (isFav) {
-              await favRef.delete();
-              return;
-            }
-
-            await favRef.set({
-              'artistId': artistId,
-              'name': artistName,
-              'imageUrl': (imageUrl ?? '').trim(),
-              'createdAt': FieldValue.serverTimestamp(),
-              'updatedAt': FieldValue.serverTimestamp(),
-            }, SetOptions(merge: true));
-          },
-        );
-      },
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(isFav ? 'Removed from favorites' : 'Added to favorites')),
+                );
+              } catch (e) {
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Favorite failed: $e')),
+                );
+              }
+            },
+      icon: Stack(
+        alignment: Alignment.center,
+        children: [
+          Icon(isFav ? Icons.favorite : Icons.favorite_border, color: Colors.white),
+          if (busy)
+            const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+        ],
+      ),
     );
   }
 }
 
-/// ✅ Put back in this file so your existing usage compiles.
 class ArtistDiscographyPage extends StatelessWidget {
   const ArtistDiscographyPage({
     super.key,
@@ -695,6 +804,8 @@ class ArtistDiscographyPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final px = (200 * dpr).round().clamp(200, 768);
 
     return Scaffold(
       appBar: AppBar(
@@ -740,6 +851,7 @@ class ArtistDiscographyPage extends StatelessWidget {
                       imageUrl: coverUrl,
                       width: double.infinity,
                       fit: BoxFit.cover,
+                      memCacheWidth: px,
                       placeholder: (_, _) => Container(color: Colors.grey[800]),
                       errorWidget: (_, _, _) => Container(
                         color: Colors.grey[800],
